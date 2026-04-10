@@ -1,0 +1,7 @@
+package taika3d:lid;
+
+world abuse-protection {
+    import keyvalue-nats-cas;
+    
+    export abuse;
+}

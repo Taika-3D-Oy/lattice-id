@@ -1,0 +1,55 @@
+version: 2.0.1
+
+build:
+  command: cargo build --workspace --target wasm32-wasip2
+  component_path: target/wasm32-wasip2/debug/oidc_gateway.wasm
+
+dev:
+  address: "0.0.0.0:8000"
+  wasi_keyvalue_path: ./dev-data/keyvalue
+  service_file: target/wasm32-wasip2/debug/core-service.wasm
+  components:
+    - name: password-hasher
+      file: target/wasm32-wasip2/debug/password_hasher.wasm
+    - name: email-worker
+      file: target/wasm32-wasip2/debug/email_worker.wasm
+    - name: abuse-protection
+      file: target/wasm32-wasip2/debug/abuse_protection.wasm
+    - name: key-manager
+      file: target/wasm32-wasip2/debug/key_manager.wasm
+    - name: region-authority
+      file: target/wasm32-wasip2/debug/region_authority.wasm
+  host_interfaces:
+    - namespace: wasi
+      package: config
+      interfaces:
+        - store
+      config:
+        dev_mode: "true"
+        issuer_url: "http://localhost:8000"
+        # email_provider: "log" (default) just logs emails to stderr.
+        # Set to "http" and configure email_http_url, email_http_api_key,
+        # email_from for production email delivery (e.g. SendGrid, SES).
+        email_provider: "log"
+        # Dev mode: skip email verification and allow open registration.
+        # In production, omit these (defaults: verification required,
+        # registration closed except bootstrap window).
+        require_email_verification: "true"
+        allow_registration: "true"
+        # Bootstrap hook: promotes the first registered user to superadmin
+        # when no superadmin exists yet. Runs only once — after the first
+        # superadmin is created the hook never fires again. Change the
+        # condition to match a specific email in production.
+        bootstrap_hook: |
+          set_superadmin(true);
+          log("Bootstrap: promoted " + user.email + " to superadmin");
+    - namespace: taika3d
+      package: lid
+      interfaces:
+        - keyvalue-nats-cas
+      config: {}
+    - namespace: taika3d
+      package: lid
+      interfaces:
+        - keyvalue-in-memory
+      config: {}

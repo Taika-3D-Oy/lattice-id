@@ -1,0 +1,13 @@
+package lattice-id:notify;
+
+interface email {
+    /// Send an email notification.
+    ///
+    /// Parameters:
+    ///   event-type  — e.g. "verify_email", "password_reset", "invitation"
+    ///   to          — recipient address
+    ///   name        — human-readable recipient name (may be empty)
+    ///   action-url  — link the recipient should visit
+    ///   metadata    — JSON-encoded extra context (e.g. tenant name, role)
+    send: func(event-type: string, to: string, name: string, action-url: string, metadata: string) -> result<_, string>;
+}

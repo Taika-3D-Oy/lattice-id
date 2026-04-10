@@ -1,0 +1,91 @@
+apiVersion: runtime.wasmcloud.dev/v1alpha1
+kind: WorkloadDeployment
+metadata:
+  name: lattice-id-us
+  namespace: us
+  annotations:
+    description: Lattice-ID US region (local two-region dev only, not production)
+spec:
+  replicas: 1
+  deployPolicy: RollingUpdate
+  template:
+    labels:
+      app.kubernetes.io/name: lattice-id
+      app.kubernetes.io/component: authority
+      lattice-id.dev/region: us
+    spec:
+      hostSelector:
+        hostgroup: us
+      components:
+        - name: oidc-gateway
+          image: kind-registry:5000/lattice-id/oidc-gateway:dev
+          poolSize: 1
+          maxInvocations: 200
+          localResources:
+            environment:
+              config:
+                issuer_url: http://us.lid.internal:8001
+                kv_prefix: lid
+        - name: password-hasher
+          image: kind-registry:5000/lattice-id/password-hasher:dev
+          poolSize: 4
+          maxInvocations: 200
+        - name: email-worker
+          image: kind-registry:5000/lattice-id/email-worker:dev
+          poolSize: 1
+          maxInvocations: 50
+        - name: abuse-protection
+          image: kind-registry:5000/lattice-id/abuse-protection:dev
+          poolSize: 2
+          maxInvocations: 200
+        - name: key-manager
+          image: kind-registry:5000/lattice-id/key-manager:dev
+          poolSize: 1
+          maxInvocations: 100
+        - name: region-authority
+          image: kind-registry:5000/lattice-id/region-authority:dev
+          poolSize: 1
+          maxInvocations: 100
+      service:
+        image: kind-registry:5000/lattice-id/core-service:dev
+        maxRestarts: 3
+        localResources:
+          environment:
+            config:
+              kv_prefix: lid
+      hostInterfaces:
+        - namespace: wasi
+          package: http
+          interfaces:
+            - incoming-handler
+          config:
+            host: "us.lid.internal:8001"
+        - namespace: wasi
+          package: config
+          interfaces:
+            - store
+          config:
+            # Dev-only two-region manifest. Keep the same shared secret in both regions.
+            internal_auth_secret: "local-two-region-dev-secret"
+            dev_mode: "true"
+            require_email_verification: "false"
+            allow_registration: "true"
+            email_provider: "log"
+            region_id: "us"
+            region_domains: '{"eu":"http://eu.lid.internal:8000","us":"http://us.lid.internal:8001"}'
+            region_internal_urls: '{"eu":"__EU_URL__","us":"__US_URL__"}'
+            bootstrap_hook: |
+              set_superadmin(true);
+              log("Bootstrap: promoted " + user.email + " to superadmin");
+        - namespace: wasi
+          package: http
+          interfaces:
+            - outgoing-handler
+        - namespace: taika3d
+          package: lid
+          interfaces:
+            - keyvalue-nats-cas
+        - namespace: taika3d
+          package: lid
+          interfaces:
+            - keyvalue-in-memory

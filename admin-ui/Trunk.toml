@@ -1,0 +1,25 @@
+[build]
+target = "index.html"
+
+[watch]
+ignore = ["dist", "target"]
+
+[serve]
+addresses = ["127.0.0.1"]
+port = 8091
+
+[[proxy]]
+rewrite = "/api/"
+backend = "http://localhost:8000/api/"
+
+[[proxy]]
+rewrite = "/authorize"
+backend = "http://localhost:8000/authorize"
+
+[[proxy]]
+rewrite = "/token"
+backend = "http://localhost:8000/token"
+
+[[proxy]]
+rewrite = "/register"
+backend = "http://localhost:8000/register"

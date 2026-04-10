@@ -1,0 +1,16 @@
+[package]
+name = "abuse-protection"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[package.metadata.component]
+package = "taika3d:abuse-protection"
+target = "wit"

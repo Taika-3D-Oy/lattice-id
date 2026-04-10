@@ -1,0 +1,7 @@
+package taika3d:lid;
+
+interface keys {
+    get-public-key: func() -> result<string, string>;
+    get-kid: func() -> result<string, string>;
+    sign-jwt: func(header: string, payload: string) -> result<string, string>;
+}

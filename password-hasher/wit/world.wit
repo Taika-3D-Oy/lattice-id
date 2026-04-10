@@ -1,0 +1,5 @@
+package lattice-id:password-hasher;
+
+world hasher {
+    export lattice-id:crypto/password;
+}

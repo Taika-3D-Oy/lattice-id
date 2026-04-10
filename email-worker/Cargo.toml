@@ -1,0 +1,19 @@
+[package]
+name = "email-worker"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+description = "Email delivery worker — exports lattice-id:notify/email interface"
+repository.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen.workspace = true
+wstd.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hmac = "0.12"
+sha2 = "0.10"

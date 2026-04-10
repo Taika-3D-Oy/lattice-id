@@ -1,0 +1,7 @@
+package taika3d:lid;
+
+world key-manager {
+    import keyvalue-nats-cas;
+    
+    export keys;
+}

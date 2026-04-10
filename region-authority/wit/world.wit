@@ -1,0 +1,8 @@
+package taika3d:lid;
+
+world region-authority {
+    import keyvalue-nats-cas;
+    import keyvalue-in-memory;
+
+    export authority;
+}

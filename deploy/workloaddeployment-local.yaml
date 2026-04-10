@@ -1,0 +1,95 @@
+apiVersion: runtime.wasmcloud.dev/v1alpha1
+kind: WorkloadDeployment
+metadata:
+  name: lattice-id
+  annotations:
+    description: Lattice-ID authority workload (local dev only, not production)
+spec:
+  replicas: 1
+  deployPolicy: RollingUpdate
+  template:
+    labels:
+      app.kubernetes.io/name: lattice-id
+      app.kubernetes.io/component: authority
+    spec:
+      components:
+        - name: oidc-gateway
+          image: kind-registry:5000/lattice-id/oidc-gateway:dev
+          poolSize: 1
+          maxInvocations: 200
+          localResources:
+            environment:
+              config:
+                issuer_url: http://localhost:8000
+                kv_prefix: lid
+        - name: password-hasher
+          image: kind-registry:5000/lattice-id/password-hasher:dev
+          poolSize: 4
+          maxInvocations: 200
+        - name: email-worker
+          image: kind-registry:5000/lattice-id/email-worker:dev
+          poolSize: 1
+          maxInvocations: 50
+        - name: abuse-protection
+          image: kind-registry:5000/lattice-id/abuse-protection:dev
+          poolSize: 2
+          maxInvocations: 200
+        - name: key-manager
+          image: kind-registry:5000/lattice-id/key-manager:dev
+          poolSize: 1
+          maxInvocations: 100
+        - name: region-authority
+          image: kind-registry:5000/lattice-id/region-authority:dev
+          poolSize: 1
+          maxInvocations: 100
+        - name: admin-ui-host
+          image: kind-registry:5000/lattice-id/admin-ui-host:dev
+          poolSize: 1
+          maxInvocations: 100
+      service:
+        image: kind-registry:5000/lattice-id/core-service:dev
+        maxRestarts: 3
+        localResources:
+          environment:
+            config:
+              kv_prefix: lid
+      hostInterfaces:
+        - namespace: wasi
+          package: http
+          interfaces:
+            - incoming-handler
+          config:
+            host: "localhost:8000"
+        - namespace: wasi
+          package: config
+          interfaces:
+            - store
+          config:
+            # Optional in single-region local dev, but kept non-empty so
+            # `/internal/*` endpoints are never left unauthenticated by default.
+            internal_auth_secret: "local-dev-internal-auth"
+            # Dev mode: skip email verification, allow open registration
+            dev_mode: "true"
+            require_email_verification: "false"
+            allow_registration: "true"
+            # Email: logs only in local dev
+            email_provider: "log"
+            # Bootstrap hook: promotes first registrant to superadmin
+            bootstrap_hook: |
+              set_superadmin(true);
+              log("Bootstrap: promoted " + user.email + " to superadmin");
+        - namespace: wasmcloud
+          package: messaging
+          interfaces:
+            - consumer
+            - handler
+          config:
+            subscriptions: ""
+        - namespace: taika3d
+          package: lid
+          interfaces:
+            - keyvalue-nats-cas
+        - namespace: taika3d
+          package: lid
+          interfaces:
+            - keyvalue-in-memory

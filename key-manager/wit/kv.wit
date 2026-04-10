@@ -1,0 +1,74 @@
+package taika3d:lid;
+
+/// Persistent key-value interface backed by NATS JetStream KV.
+/// Every mutation returns a revision number, enabling optimistic concurrency
+/// through the `swap` (compare-and-swap) operation.
+interface keyvalue-nats-cas {
+    record entry {
+        value: list<u8>,
+        revision: u64,
+    }
+
+    variant error {
+        no-such-store,
+        access-denied,
+        revision-mismatch,
+        key-not-found,
+        key-exists,
+        other(string),
+    }
+
+    record key-response {
+        keys: list<string>,
+        cursor: option<u64>,
+    }
+
+    resource bucket {
+        get: func(key: string) -> result<option<entry>, error>;
+        set: func(key: string, value: list<u8>) -> result<u64, error>;
+        delete: func(key: string) -> result<_, error>;
+        exists: func(key: string) -> result<bool, error>;
+        list-keys: func(cursor: option<u64>) -> result<key-response, error>;
+        swap: func(key: string, value: list<u8>, revision: u64) -> result<u64, error>;
+        create: func(key: string, value: list<u8>) -> result<u64, error>;
+        increment: func(key: string, delta: u64) -> result<u64, error>;
+    }
+
+    open: func(identifier: string) -> result<bucket, error>;
+}
+
+/// Ephemeral key-value interface backed by per-workload in-memory storage.
+/// Same API shape as `keyvalue-nats-cas` but data is not persisted across restarts.
+interface keyvalue-in-memory {
+    record entry {
+        value: list<u8>,
+        revision: u64,
+    }
+
+    variant error {
+        no-such-store,
+        access-denied,
+        revision-mismatch,
+        key-not-found,
+        key-exists,
+        other(string),
+    }
+
+    record key-response {
+        keys: list<string>,
+        cursor: option<u64>,
+    }
+
+    resource bucket {
+        get: func(key: string) -> result<option<entry>, error>;
+        set: func(key: string, value: list<u8>) -> result<u64, error>;
+        delete: func(key: string) -> result<_, error>;
+        exists: func(key: string) -> result<bool, error>;
+        list-keys: func(cursor: option<u64>) -> result<key-response, error>;
+        swap: func(key: string, value: list<u8>, revision: u64) -> result<u64, error>;
+        create: func(key: string, value: list<u8>) -> result<u64, error>;
+        increment: func(key: string, delta: u64) -> result<u64, error>;
+    }
+
+    open: func(identifier: string) -> result<bucket, error>;
+}

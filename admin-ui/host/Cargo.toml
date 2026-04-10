@@ -1,0 +1,18 @@
+[package]
+name = "admin-ui-host"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.35.0"
+include_dir = "0.7"
+
+[package.metadata.component]
+package = "lattice-id:admin-ui-host"
+
+[package.metadata.component.target]
+path = "wit"
+world = "host"

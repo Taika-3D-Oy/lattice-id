@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build_and_test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: wasm32-wasip2
+        components: clippy, rustfmt
+        
+    - name: Check Formatting
+      run: cargo fmt -- --check
+      
+    - name: Clippy
+      run: cargo clippy --workspace --all-features -- -D warnings
+      
+    - name: Build
+      run: cargo build --workspace --target wasm32-wasip2
+      
+    - name: Run Tests
+      # If wasm32 tests require a runner like wasmtime, it could be tricky.
+      # Local tests just run on native host OS for lib logic that isn't wasm-specific.
+      run: cargo test --workspace
+
+  integration_authority:
+    runs-on: ubuntu-latest
+    needs: build_and_test
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: wasm32-wasip2
+
+    - name: Install wash
+      shell: bash
+      run: |
+        curl -fsSL https://wasmcloud.com/sh | bash
+        echo "$HOME/.wash/bin" >> "$GITHUB_PATH"
+
+    - name: Run Integration Tests
+      shell: bash
+      run: |
+        chmod +x tests/*.sh
+        # Run individual test scripts
+        ./tests/integration_authority.sh
+        ./tests/integration_restart.sh
+        ./tests/integration_isolation.sh
+        ./tests/integration_protocol.sh

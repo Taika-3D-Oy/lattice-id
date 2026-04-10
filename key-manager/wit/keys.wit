@@ -1,0 +1,13 @@
+package taika3d:lid;
+
+interface keys {
+    /// Get the current public key in JWK format.
+    get-public-key: func() -> result<string, string>;
+
+    /// Get the current Key ID (KID).
+    get-kid: func() -> result<string, string>;
+
+    /// Sign a message using the current private key.
+    /// Returns the signature as a base64-encoded string (JWS signature part).
+    sign-jwt: func(header: string, payload: string) -> result<string, string>;
+}

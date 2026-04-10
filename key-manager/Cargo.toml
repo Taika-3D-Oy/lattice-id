@@ -1,0 +1,21 @@
+[package]
+name = "key-manager"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rsa = { version = "0.9", features = ["sha2"] }
+sha2 = "0.10"
+base64 = "0.21"
+rand_core = { version = "0.6", features = ["getrandom"] }
+num-bigint-dig = "0.8"
+
+[package.metadata.component]
+package = "taika3d:key-manager"
+target = "wit"

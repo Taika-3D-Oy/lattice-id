@@ -1,0 +1,15 @@
+package lattice-id:admin;
+
+interface assets {
+    record asset {
+        name: string,
+        content-type: string,
+        data: list<u8>,
+    }
+
+    get-asset: func(path: string) -> option<asset>;
+}
+
+world host {
+    export assets;
+}

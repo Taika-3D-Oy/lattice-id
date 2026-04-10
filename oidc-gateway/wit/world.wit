@@ -1,0 +1,13 @@
+package lattice-id:oidc;
+
+world gateway {
+    import lattice-id:crypto/password;
+    import taika3d:lid/keyvalue-nats-cas;
+    import taika3d:lid/keyvalue-in-memory;
+    import wasi:config/store@0.2.0-rc.1;
+    import wasi:http/outgoing-handler@0.2.2;
+    import lattice-id:notify/email;
+    import taika3d:lid/abuse;
+    import taika3d:lid/keys;
+    import taika3d:lid/authority;
+}
