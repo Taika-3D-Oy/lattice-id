@@ -1,5 +1,6 @@
 [build]
 target = "index.html"
+public_url = "/admin/"
 
 [watch]
 ignore = ["dist", "target"]
@@ -23,3 +24,23 @@ backend = "http://localhost:8000/token"
 [[proxy]]
 rewrite = "/register"
 backend = "http://localhost:8000/register"
+
+[[proxy]]
+rewrite = "/passkeys/"
+backend = "http://localhost:8000/passkeys/"
+
+[[proxy]]
+rewrite = "/login"
+backend = "http://localhost:8000/login"
+
+[[proxy]]
+rewrite = "/auth/"
+backend = "http://localhost:8000/auth/"
+
+[[proxy]]
+rewrite = "/verify/"
+backend = "http://localhost:8000/verify/"
+
+[[proxy]]
+rewrite = "/.well-known/"
+backend = "http://localhost:8000/.well-known/"

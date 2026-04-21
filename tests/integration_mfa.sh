@@ -34,10 +34,10 @@ PY
 }
 
 echo "==> Starting MFA integration test"
-start_wash_dev
+wait_for_cluster
 
 # 1. Register admin (bootstrap hook promotes to superadmin)
-ADMIN_EMAIL="mfa.admin@example.com"
+ADMIN_EMAIL="mfa.admin.$(date +%s)@example.com"
 ADMIN_PASSWORD='password123'
 ADMIN_NAME='MFA Admin'
 ADMIN_TOKEN=$(register_and_login_superadmin "$ADMIN_EMAIL" "$ADMIN_PASSWORD" "$ADMIN_NAME")
@@ -69,7 +69,7 @@ echo "==> Testing MFA Login (TOTP)"
 VERIFIER=$(random_string)
 CHALLENGE=$(python3 -c "import base64, hashlib, sys; digest = hashlib.sha256(sys.argv[1].encode('utf-8')).digest(); print(base64.urlsafe_b64encode(digest).decode('ascii').rstrip('='))" "$VERIFIER")
 AUTH_PAGE_BODY="$TMP_DIR/auth-page.html"
-status=$(curl -sS -o "$AUTH_PAGE_BODY" -w '%{http_code}' -X GET "$BASE_URL/authorize?response_type=code&client_id=lid-admin&redirect_uri=http://localhost:8000/callback&scope=openid+offline_access&code_challenge=$CHALLENGE&code_challenge_method=S256&state=mfa-state&nonce=mfa-nonce")
+status=$(curl -sS -o "$AUTH_PAGE_BODY" -w '%{http_code}' -X GET "$BASE_URL/authorize?response_type=code&client_id=lid-admin&redirect_uri=$BASE_URL/callback&scope=openid+offline_access&code_challenge=$CHALLENGE&code_challenge_method=S256&state=mfa-state&nonce=mfa-nonce")
 assert_eq 200 "$status" "authorize page"
 SESSION_ID=$(python3 -c "import re, sys; m = re.search(r'name=\"session_id\"\s+value=\"([^\"]+)\"', open('$AUTH_PAGE_BODY').read()); print(m.group(1))")
 
@@ -111,7 +111,7 @@ status=$(curl -sS -o "$MFA_TOKEN_BODY" -w '%{http_code}' -X POST "$BASE_URL/toke
     --data-urlencode 'grant_type=authorization_code' \
     --data-urlencode "code=$CODE_PARAM" \
     --data-urlencode "code_verifier=$VERIFIER" \
-    --data-urlencode 'redirect_uri=http://localhost:8000/callback' \
+    --data-urlencode "redirect_uri=$BASE_URL/callback" \
     --data-urlencode 'client_id=lid-admin' \
     --data-urlencode 'scope=openid+offline_access')
 assert_eq 200 "$status" "MFA token exchange"
@@ -139,7 +139,7 @@ assert_eq urn:lattice-id:mfa:totp "$(jwt_claim "$MFA_REFRESH_ID_TOKEN" acr)" "MF
 echo "==> Testing MFA Login (Recovery Code)"
 # New session
 AUTH_PAGE_BODY_2="$TMP_DIR/auth-page-2.html"
-curl -sS -o "$AUTH_PAGE_BODY_2" -X GET "$BASE_URL/authorize?response_type=code&client_id=lid-admin&redirect_uri=http://localhost:8000/callback&code_challenge=$CHALLENGE&code_challenge_method=S256&state=mfa-state-2&nonce=mfa-nonce"
+curl -sS -o "$AUTH_PAGE_BODY_2" -X GET "$BASE_URL/authorize?response_type=code&client_id=lid-admin&redirect_uri=$BASE_URL/callback&code_challenge=$CHALLENGE&code_challenge_method=S256&state=mfa-state-2&nonce=mfa-nonce"
 SESSION_ID_2=$(python3 -c "import re, sys; m = re.search(r'name=\"session_id\"\s+value=\"([^\"]+)\"', open('$AUTH_PAGE_BODY_2').read()); print(m.group(1))")
 
 MFA_PAGE_BODY_2="$TMP_DIR/mfa-page-2.html"

@@ -1,0 +1,18 @@
+[build]
+target = "wasm32-wasip3"
+
+[target.wasm32-wasip3]
+rustflags = ["-C", "target-feature=+simd128"]
+runner = [
+    "wasmtime", "run",
+    "-S", "p3=y",
+    "-S", "cli=y",
+    "-S", "http=y",
+    "-S", "inherit-network=y",
+    "-S", "config=y",
+    "-W", "component-model=y",
+    "-W", "component-model-async=y",
+]
+
+[unstable]
+build-std = ["std", "panic_abort"]

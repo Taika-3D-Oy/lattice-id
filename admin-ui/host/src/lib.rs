@@ -2,6 +2,7 @@ use include_dir::{include_dir, Dir};
 
 wit_bindgen::generate!({
     world: "host",
+    generate_all,
 });
 
 const DIST_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../dist");
@@ -16,7 +17,6 @@ impl exports::lattice_id::admin::assets::Guest for Host {
             &path
         };
 
-        // If path is empty or just /, serve index.html
         let target_path = if clean_path.is_empty() {
             "index.html"
         } else {
@@ -25,7 +25,7 @@ impl exports::lattice_id::admin::assets::Guest for Host {
 
         let file = DIST_DIR.get_file(target_path)?;
         let data = file.contents().to_vec();
-        
+
         let content_type = match target_path.split('.').last() {
             Some("html") => "text/html",
             Some("js") => "application/javascript",
@@ -35,11 +35,12 @@ impl exports::lattice_id::admin::assets::Guest for Host {
             Some("svg") => "image/svg+xml",
             Some("json") => "application/json",
             _ => "application/octet-stream",
-        }.to_string();
+        }
+        .to_string();
 
         Some(exports::lattice_id::admin::assets::Asset {
             name: target_path.to_string(),
-            content_type: content_type,
+            content_type,
             data,
         })
     }

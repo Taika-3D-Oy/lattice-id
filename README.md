@@ -2,111 +2,84 @@
 
 Lattice-ID is a NATS-native OIDC provider for wasmCloud, backed by JetStream KV.
 
-This repository is still alpha. The short version is: use the README to get a local dev environment running, and use the linked docs for security, scaling, and multi-region details.
+Runs as a standard wasmCloud workload alongside your applications — no extra database, no separate infrastructure. Lattice-ID uses [lattice-db](https://github.com/Taika-3D-Oy/lattice-db) for all persistent state via NATS JetStream KV.
 
 ## Maintainer notes
 
-Lattice-ID currently depends on custom host plugins for:
-
-- NATS KV with CAS
-- in-memory KV used as a cache
-
-For internal testing those were adapted from `wasi:keyvalue`.
-
-This currently means you need a custom `wash` and runtime fork to develop and test Lattice-ID.
+Lattice-ID uses [lattice-db](https://github.com/Taika-3D-Oy/lattice-db) for all persistent state. lattice-db runs as a separate wasmCloud workload and provides NATS KV with CAS semantics over request/reply messaging (`wasmcloud:messaging`).
 
 All deployment files exist solely for testing and validating Lattice-ID locally.
 
 ## Status
 
-- OIDC/OAuth implementation is substantial, but the project is not yet production-hardened.
-- The current security review is in [SECURITY_AUDIT_2026-04-09.md](SECURITY_AUDIT_2026-04-09.md).
-- Compliance details are in [OIDC_COMPLIANCE_AUDIT.md](OIDC_COMPLIANCE_AUDIT.md).
-- Multi-region design is in [MULTI_REGION.md](MULTI_REGION.md).
+**v1.0.0**
+
+- Full OIDC/OAuth2 compliance (authorization code + PKCE, client credentials, device flow, refresh token rotation)
+- Security hardening: CSRF protection, refresh token absolute lifetime cap, account lockout, rate limiting, consent screen
+- GDPR: user data export (`GET /api/users/:id/export`) and erasure (`DELETE /api/users/:id`)
+- Backchannel logout (RFC 8613), RP-initiated logout (OIDC RP-Initiated Logout 1.0)
+- Multi-region design: [MULTI_REGION.md](MULTI_REGION.md)
 
 ## Workspace Layout
 
-- `oidc-gateway`: HTTP OIDC surface and management API
-- `core-service`: signing keys, coordination, metrics
-- `password-hasher`: Argon2 worker
-- `email-worker`: email delivery adapters
-- `abuse-protection`: rate limiting and lockout support
-- `key-manager`: key persistence helpers
-- `region-authority`: home-region lookup support
-- `admin-ui`: optional local admin UI served by Trunk
+- `oidc-gateway`: HTTP OIDC surface, management API, and embedded admin UI serving
+- `password-hasher`: Argon2id worker (SIMD-accelerated)
+- `email-worker`: email delivery (log for dev, AWS SES for production)
+- `abuse-protection`: rate limiting and account lockout
+- `key-manager`: RSA signing key persistence
+- `region-authority`: home-region lookup for multi-region deployments
+- `admin-ui`: optional Leptos admin UI (builds separately with Trunk)
+- `admin-ui/host`: WASI component that embeds the admin UI dist and serves via the gateway
 
 ## Prerequisites
 
-- Rust with the `wasm32-wasip2` target
-- the custom Taika3D `wash` build from `https://github.com/Taika-3D-Oy/wasmCloud`
-- `trunk` if you want the admin UI
+- Rust nightly with the `wasm32-wasip3` target
+- `wash` (stock upstream wasmCloud CLI)
+- `kind`, `kubectl`, `helm` for local Kubernetes clusters
+- `docker` for the local OCI registry
 - `curl` and `python3` for integration tests
+- `trunk` if you want the admin UI
+- Access to [lattice-db](https://github.com/Taika-3D-Oy/lattice-db) OCI images on GHCR (default: `ghcr.io/taika-3d-oy/lattice-db/storage-service:latest`)
 
 ```bash
-rustup target add wasm32-wasip2
+rustup target add wasm32-wasip3
 ```
-
-## Custom `wash` Requirement
-
-Lattice-ID does not work with stock upstream `wash`.
-
-Local development depends on custom `wash-runtime` plugins for these interfaces:
-
-- `taika3d:lid/keyvalue-nats-cas`
-- `taika3d:lid/keyvalue-in-memory`
-
-Those plugins are wired into the Taika3D fork of `wasmCloud`, including the filesystem-backed fallback used by `wash dev` in this repo.
-
-
-```bash
-git clone https://github.com/Taika-3D-Oy/wasmCloud
-cd wasmCloud
-cargo install --path crates/wash --force
-export PATH="$HOME/.cargo/bin:$PATH"
-```
-
-The important part is that the custom binary is first on your `PATH`; otherwise `wash dev` will fail when it tries to bind the `taika3d:lid` host interfaces from `.wash/config.yaml`.
 
 ## Local Development
 
-### Fast path
+Lattice-ID requires lattice-db for persistent storage, which means it runs on
+a Kind cluster with the wasmCloud operator — not standalone via `wash dev`.
+
+### Deploy a local cluster
 
 ```bash
-./dev.sh start
+bash deploy/deploy-local.sh
 ```
 
-That script:
+This script:
 
-- starts `wash dev` on `http://localhost:8000`
-- starts the admin UI on `http://localhost:8091`
-- waits until discovery is serving
+- Creates a Kind cluster with a local OCI registry
+- Installs the wasmCloud operator via Helm
+- Deploys a standalone NATS JetStream data-plane (`nats-data`)
+- Builds and pushes lattice-id wasm components
+- Deploys lattice-db from GHCR (override with `LATTICE_DB_IMAGE=...`)
+- Deploys both as WorkloadDeployments
+- Exposes the HTTP gateway on `http://localhost:8000`
 
-Useful commands:
-
-```bash
-./dev.sh stop
-./dev.sh reset
-```
-
-### Manual path
+Other commands:
 
 ```bash
-cargo build --workspace --target wasm32-wasip2
-wash dev --non-interactive
-```
-
-For the admin UI in a second terminal:
-
-```bash
-cd admin-ui
-trunk serve
+bash deploy/deploy-local.sh rebuild   # rebuild + redeploy components
+bash deploy/deploy-local.sh teardown  # destroy the cluster
+bash deploy/deploy-local.sh status    # show cluster status
 ```
 
 ## Bootstrap Behavior
 
-The default `.wash/config.yaml` runs in dev mode and includes a bootstrap hook that promotes the first registered user to superadmin.
+The `deploy/workloaddeployment-local.yaml` manifest includes a `bootstrap_hook`
+that promotes the first registered user to superadmin automatically.
 
-If you want to restrict that to a specific email during local work, edit `.wash/config.yaml`:
+To restrict bootstrap to a specific email, edit the inline Rhai hook:
 
 ```yaml
 bootstrap_hook: |
@@ -119,7 +92,7 @@ bootstrap_hook: |
 ## Build And Check
 
 ```bash
-cargo build --workspace --target wasm32-wasip2
+cargo build --workspace --target wasm32-wasip3
 cargo test --workspace
 ```
 
@@ -127,51 +100,91 @@ The `admin-ui` crate is excluded from the root workspace and builds separately.
 
 ## Integration Tests
 
-Most integration tests boot their own `wash dev` instance and expect a clean local environment.
+Integration tests run against a live Kind cluster. The test runner resets the
+cluster state (NATS data + lattice-db) before each test to ensure a clean slate.
 
-Run one test:
-
-```bash
-bash tests/integration_authority.sh
-```
-
-Run the single-region suite:
+### Run all tests
 
 ```bash
-for t in tests/integration_*.sh; do
-  [[ "$t" == *two_region* ]] && continue
-  bash "$t" || break
-done
+bash tests/run_cluster_tests.sh
 ```
 
-Run the multi-region test:
+### Run a single test
 
 ```bash
-bash tests/integration_two_region.sh
+bash tests/run_cluster_tests.sh authority    # filter by name
 ```
 
-Test coverage by script:
+### Skip reset (use existing state)
 
-- `tests/integration_authority.sh`: authorization code flow, refresh, token validation
-- `tests/integration_protocol.sh`: discovery, PKCE, scopes, claims behavior
-- `tests/integration_hooks.sh`: Rhai post-login and post-registration hooks
-- `tests/integration_mfa.sh`: TOTP setup, verification, recovery codes
-- `tests/integration_isolation.sh`: tenant isolation and role boundaries
-- `tests/integration_hardening.sh`: malformed input and edge cases
-- `tests/integration_rate_limit.sh`: brute-force protection and lockout
-- `tests/integration_restart.sh`: persistence across restarts
-- `tests/integration_social_mock.sh`: mocked Google OAuth flow
-- `tests/integration_two_region.sh`: cross-region lookup and config sync
-- `tests/stress_authority.sh`: crude concurrency stress
+```bash
+bash tests/run_cluster_tests.sh --no-reset
+```
+
+### Test coverage
+
+| Script | Coverage |
+|--------|----------|
+| `integration_authority` | auth code flow, refresh, introspection, claims, replay detection |
+| `integration_protocol` | invalid tokens, malformed JWTs, missing PKCE, unregistered redirect_uri, wrong code_verifier |
+| `integration_hooks` | Rhai hook CRUD, dry-run, set_superadmin, set_claim |
+| `integration_mfa` | TOTP setup, verification, recovery codes |
+| `integration_isolation` | tenant isolation and role boundaries |
+| `integration_rate_limit` | brute-force protection and lockout |
+| `integration_hardening` | error handling, refresh token rotation, absolute lifetime cap |
+| `integration_restart` | workload restart resilience and state recovery |
+| `integration_new_features` | client_credentials, device flow, ES256 signing, `/version` |
+| `integration_account` | CSRF protection, consent screen (allow/deny/state), first_party flag, GDPR export+delete |
+| `integration_logout` | RP-initiated logout, open-redirect protection, prompt=none/login/consent, /healthz, /readyz |
+| `integration_backchannel` | backchannel logout_token delivery and validation (RFC 8613) |
+| `integration_social_mock` | Google OIDC social login with mock IdP |
+| `integration_two_region` | cross-region user lookup, redirect, tenant/client replication |
+
+## Features
+
+**OIDC / OAuth2**
+- Authorization Code flow with PKCE (S256)
+- Client Credentials grant (confidential clients)
+- Device Authorization grant (RFC 8628)
+- Refresh token rotation with replay detection and 90-day absolute lifetime cap
+- Backchannel Logout (RFC 8613) with signed `logout_token`
+- RP-Initiated Logout (OIDC RP-Initiated Logout 1.0) with open-redirect protection
+- `prompt=none/login/consent`, `max_age`, `id_token_hint`, `login_hint`, `claims` parameter
+- RS256 and per-client ES256 ID token signing
+- Token introspection (RFC 7662)
+
+**Security**
+- CSRF tokens on all account self-service mutations
+- Consent screen for third-party clients (`first_party` flag to opt out)
+- Account lockout after configurable failure threshold
+- IP-based rate limiting via abuse-protection component
+- Refresh token absolute lifetime cap (configurable, default 90 days)
+- PKCE enforced for all public clients
+
+**Identity & Access**
+- Passkeys (WebAuthn) for passwordless authentication
+- TOTP-based MFA with recovery codes
+- Google OIDC social login (generic OIDC federation supported)
+- Self-service account management (password change, email update, passkey enrollment)
+- Email verification and invitation flows
+- Multi-tenant with per-membership roles (`tenant_id`, `role` claims)
+
+**Operations**
+- GDPR: data export (`GET /api/users/:id/export`) and erasure (`DELETE /api/users/:id`)
+- Audit log entries in a dedicated KV bucket
+- Rhai scripting hooks for custom authorization logic and claim injection
+- `/healthz` (liveness) and `/readyz` (readiness with KV + key checks)
+- Prometheus-format metrics at `/metrics`
+- Embedded admin UI served at `/admin`
+- Multi-region deployment with cross-region user routing
+- Multi-tenant lattice-db support (`ldb_tenant` config)
+- AWS SES email delivery for production, log provider for development
 
 ## Important Docs
 
 - [INTEGRATION.md](INTEGRATION.md): integrating an application with Lattice-ID
-- [K8S_DEV.md](K8S_DEV.md): Kubernetes-based development flow
+- [K8S_DEV.md](K8S_DEV.md): Kubernetes-based development flow, email delivery configuration
 - [MULTI_REGION.md](MULTI_REGION.md): two-region architecture and deployment notes
-- [SECURITY_AUDIT_2026-04-09.md](SECURITY_AUDIT_2026-04-09.md): current security review and outstanding issues
-- [SCALABILITY_ANALYSIS.md](SCALABILITY_ANALYSIS.md): throughput and capacity notes
-- [OIDC_COMPLIANCE_AUDIT.md](OIDC_COMPLIANCE_AUDIT.md): protocol compliance details
 
 ## License
 

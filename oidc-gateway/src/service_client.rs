@@ -1,157 +1,46 @@
 use serde_json::{Value, json};
-use wstd::io::{AsyncRead, AsyncWrite};
-use wstd::net::TcpStream;
 
 use crate::{jwt, keys, store};
 
-trait ReadExt: AsyncRead + Unpin {
-    async fn read_exact_lid(&mut self, mut buf: &mut [u8]) -> Result<(), String> {
-        while !buf.is_empty() {
-            let n = AsyncRead::read(self, buf).await.map_err(|e| e.to_string())?;
-            if n == 0 {
-                return Err("failed to fill whole buffer".to_string());
-            }
-            let (_, rest) = std::mem::take(&mut buf).split_at_mut(n);
-            buf = rest;
-        }
-        Ok(())
-    }
-}
-impl<T: AsyncRead + Unpin> ReadExt for T {}
-
-trait WriteExt: AsyncWrite + Unpin {
-    async fn write_all_lid(&mut self, mut buf: &[u8]) -> Result<(), String> {
-        while !buf.is_empty() {
-            let n = AsyncWrite::write(self, buf).await.map_err(|e| e.to_string())?;
-            if n == 0 {
-                return Err("failed to write whole buffer".to_string());
-            }
-            buf = &buf[n..];
-        }
-        Ok(())
-    }
-}
-impl<T: AsyncWrite + Unpin> WriteExt for T {}
-
-const SERVICE_ADDR: &str = "127.0.0.1:7899";
-
 /// Hash a password locally via imported hasher (stateless scaling).
-pub fn hash_password(plain: &str) -> Result<String, String> {
+pub async fn hash_password(plain: &str) -> Result<String, String> {
     crate::bindings::lattice_id::crypto::password::hash(plain)
 }
 
 /// Verify a password locally via imported hasher (stateless scaling).
-pub fn verify_password(plain: &str, hash: &str) -> Result<bool, String> {
+pub async fn verify_password(plain: &str, hash: &str) -> Result<bool, String> {
     crate::bindings::lattice_id::crypto::password::verify(plain, hash)
 }
 
-/// Send a JSON request to core-service via TCP and return the parsed response.
-/// Task 2.13: Implement TCP framing (length-prefixed).
-/// Task 2.17: Authenticate TCP channel with HMAC-based handshake.
-pub async fn call(request: &Value) -> Result<Value, String> {
-    let mut stream = TcpStream::connect(SERVICE_ADDR).await.map_err(|e| {
-        crate::logger::error_message("core_service.connect_failed", e);
-        "internal service unavailable".to_string()
-    })?;
-
-    // Phase 2.17: Authenticate connection if an auth key is configured.
-    if let Some(auth_key) = crate::store::core_service_auth_key() {
-        use sha2::{Digest, Sha256};
-        // 1. Read 16-byte nonce from server
-        let mut nonce = [0u8; 16];
-        stream.read_exact_lid(&mut nonce)
-            .await
-            .map_err(|e| format!("read auth nonce: {e}"))?;
-
-        // 2. Compute HMAC-like challenge: SHA256(nonce + auth_key)
-        let mut hasher = Sha256::new();
-        hasher.update(nonce);
-        hasher.update(auth_key.as_bytes());
-        let response = hasher.finalize();
-
-        // 3. Send 32-byte response back to server
-        stream.write_all_lid(&response)
-            .await
-            .map_err(|e| format!("write auth response: {e}"))?;
-    }
-
-    let mut request_obj = request
-        .as_object()
-        .cloned()
-        .ok_or_else(|| "request must be a JSON object".to_string())?;
-    if let Some(trace_id) = crate::logger::current_trace_id() {
-        request_obj.insert("trace_id".to_string(), Value::String(trace_id));
-    }
-
-    let req_bytes = serde_json::to_vec(&Value::Object(request_obj))
-        .map_err(|e| format!("serialize: {e}"))?;
-    let req_len = (req_bytes.len() as u32).to_be_bytes();
-
-    stream.write_all_lid(&req_len)
-        .await
-        .map_err(|e| format!("write length: {e}"))?;
-    stream.write_all_lid(&req_bytes)
-        .await
-        .map_err(|e| format!("write: {e}"))?;
-
-    // Read 4-byte response length prefix
-    let mut len_buf = [0u8; 4];
-    stream.read_exact_lid(&mut len_buf)
-        .await
-        .map_err(|e| format!("read length: {e}"))?;
-    let resp_len = u32::from_be_bytes(len_buf) as usize;
-
-    if resp_len > 1024 * 1024 {
-        return Err("Response too large from core-service".into());
-    }
-
-    let mut buf = vec![0u8; resp_len];
-    stream.read_exact_lid(&mut buf)
-        .await
-        .map_err(|e| format!("read body: {e}"))?;
-
-    let resp: Value = serde_json::from_slice(&buf).map_err(|e| format!("parse response: {e}"))?;
-
-    if resp.get("ok").and_then(|v| v.as_bool()) == Some(true) {
-        Ok(resp)
-    } else {
-        let err = resp
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown error");
-        Err(err.to_string())
-    }
-}
-
 /// Verify a JWT and enforce issuer, audience, and token_type requirements.
-/// Now runs entirely locally using signing keys loaded from KV.
+/// Runs entirely locally using signing keys loaded from KV.
 pub async fn verify_token_scoped(
     token: &str,
     expected_issuer: Option<&str>,
     expected_audience: Option<&str>,
     required_token_type: Option<&str>,
 ) -> Result<Value, String> {
-    let key_store = keys::KeyStore::load()?;
+    let key_store = keys::KeyStore::load().await?;
     let verifiers = key_store.all_verifiers();
     let claims = jwt::verify(token, &verifiers)?;
 
     // Validate iat and nbf
     let now = store::unix_now();
-    if let Some(iat) = claims.get("iat").and_then(|v| v.as_u64()) {
-        if iat > now + 30 {
-            return Err("token iat is in the future".into());
-        }
+    if let Some(iat) = claims.get("iat").and_then(|v| v.as_u64())
+        && iat > now + 30
+    {
+        return Err("token iat is in the future".into());
     }
-    if let Some(nbf) = claims.get("nbf").and_then(|v| v.as_u64()) {
-        if nbf > now + 30 {
-            return Err("token not yet active (nbf)".into());
-        }
+    if let Some(nbf) = claims.get("nbf").and_then(|v| v.as_u64())
+        && nbf > now + 30
+    {
+        return Err("token not yet active (nbf)".into());
     }
 
     // Revocation check
     if let Some(sub) = claims.get("sub").and_then(|v| v.as_str()) {
         let iat = claims.get("iat").and_then(|v| v.as_u64()).unwrap_or(0);
-        if let Ok(true) = store::is_user_revoked(sub, iat) {
+        if let Ok(true) = store::is_user_revoked(sub, iat).await {
             return Err("token revoked".into());
         }
     }
@@ -168,9 +57,9 @@ pub async fn verify_token_scoped(
     if let Some(expected) = expected_audience {
         let aud_ok = match claims.get("aud") {
             Some(Value::String(value)) => value == expected,
-            Some(Value::Array(values)) => values
-                .iter()
-                .any(|value| value.as_str() == Some(expected)),
+            Some(Value::Array(values)) => {
+                values.iter().any(|value| value.as_str() == Some(expected))
+            }
             _ => false,
         };
         if !aud_ok {
@@ -194,21 +83,19 @@ pub async fn verify_token_scoped(
 
 /// Get the JWKS (public keys) — now loaded directly from KV.
 pub async fn get_jwks() -> Result<Value, String> {
-    let key_store = keys::KeyStore::load()?;
-    Ok(key_store.jwks())
-}
-
-pub async fn health_status() -> Result<Value, String> {
-    let resp = call(&json!({"op": "health_status"})).await?;
-    resp.get("data")
-        .cloned()
-        .ok_or_else(|| "missing health status data".into())
-}
-
-/// Import previously saved signing keys into core-service.
-pub async fn import_keys(data: &Value) -> Result<(), String> {
-    call(&json!({"op": "import_keys", "data": data})).await?;
-    Ok(())
+    // Use get_public_keys() to return all keys (RS256 + ES256) in a single JWKS.
+    match crate::bindings::taika3d::lid::keys::get_public_keys() {
+        Ok(keys_json) => {
+            let keys: Vec<Value> =
+                serde_json::from_str(&keys_json).map_err(|e| format!("parse keys: {e}"))?;
+            Ok(serde_json::json!({ "keys": keys }))
+        }
+        // Fall back to single-key path (key-manager not yet updated in older deploys)
+        Err(_) => {
+            let key_store = keys::KeyStore::load().await?;
+            Ok(key_store.jwks())
+        }
+    }
 }
 
 /// Check rate limit via the imported abuse protection component.
@@ -217,27 +104,49 @@ pub async fn check_rate(key: &str, limit: u64, window_secs: u64) -> Result<(bool
     crate::bindings::taika3d::lid::abuse::check_rate(key, limit, window_secs)
 }
 
+// ── Envelope encryption helpers ──────────────────────────────
+
+/// Encrypt `plaintext` bound to `context` (AAD) via the crypto-vault component.
+///
+/// `context` must follow the convention "{bucket}:{key-prefix}" so ciphertext
+/// is bound to its storage location, e.g. `"lid-users:user"`.
+pub async fn vault_encrypt(context: &str, plaintext: &[u8]) -> Result<Vec<u8>, String> {
+    crate::bindings::taika3d::lid::vault::encrypt(context, plaintext)
+        .map_err(|e| format!("vault_encrypt({context}): {e:?}"))
+}
+
+/// Decrypt an envelope produced by `vault_encrypt`.
+/// `context` must exactly match the value used at encryption time.
+pub async fn vault_decrypt(context: &str, ciphertext: &[u8]) -> Result<Vec<u8>, String> {
+    crate::bindings::taika3d::lid::vault::decrypt(context, ciphertext)
+        .map_err(|e| format!("vault_decrypt({context}): {e:?}"))
+}
+
+/// Return the currently active vault key version (for monitoring).
+#[allow(dead_code)]
+pub fn vault_version() -> u32 {
+    crate::bindings::taika3d::lid::vault::current_version()
+}
+
 pub async fn increment_metric(name: &str, labels: &[(&str, &str)]) -> Result<(), String> {
     let label_map: serde_json::Map<String, serde_json::Value> = labels
         .iter()
         .map(|(k, v)| ((*k).to_string(), json!(*v)))
         .collect();
-    let _ = call(&json!({
+    let payload = json!({
         "op": "metric_increment",
         "name": name,
         "labels": label_map,
-    }))
-    .await;
+    });
+    let body = serde_json::to_vec(&payload).unwrap_or_default();
+    // Fire-and-forget via NATS publish — avoids slow TCP round-trip.
+    let msg = crate::bindings::wasmcloud::messaging::types::BrokerMessage {
+        subject: "lid.metrics".to_string(),
+        body,
+        reply_to: None,
+    };
+    let _ = crate::bindings::wasmcloud::messaging::consumer::publish(msg).await;
     Ok(())
-}
-
-pub async fn render_metrics() -> Result<String, String> {
-    let resp = call(&json!({ "op": "metrics_render" })).await?;
-    resp.get("data")
-        .and_then(|d| d.get("text"))
-        .and_then(|v| v.as_str())
-        .map(|value| value.to_string())
-        .ok_or_else(|| "missing metrics text".to_string())
 }
 
 /// Cross-region lookup: first check local region via authority component,
@@ -247,7 +156,7 @@ pub async fn lookup_region(email_hash: &str) -> Result<Option<String>, String> {
     let cache_key = format!("region:{}", email_hash);
 
     // 1. Check in-memory cache
-    if let Ok(Some(region)) = crate::store::kv_cache_get::<Option<String>>(&cache_key) {
+    if let Ok(Some(region)) = crate::store::kv_cache_get::<Option<String>>(&cache_key).await {
         return Ok(region);
     }
 
@@ -255,7 +164,7 @@ pub async fn lookup_region(email_hash: &str) -> Result<Option<String>, String> {
     let local = crate::bindings::taika3d::lid::authority::lookup(email_hash)?;
     if local.found {
         let region = local.region;
-        let _ = crate::store::kv_cache_set(&cache_key, &region, 3600);
+        let _ = crate::store::kv_cache_set(&cache_key, &region, 3600).await;
         return Ok(region);
     }
 
@@ -277,12 +186,12 @@ pub async fn lookup_region(email_hash: &str) -> Result<Option<String>, String> {
         );
         match internal_http_get(&url).await {
             Ok(body) => {
-                if let Ok(reply) = serde_json::from_slice::<LookupReply>(&body) {
-                    if reply.found {
-                        let region = Some(reply.region);
-                        let _ = crate::store::kv_cache_set(&cache_key, &region, 3600);
-                        return Ok(region);
-                    }
+                if let Ok(reply) = serde_json::from_slice::<LookupReply>(&body)
+                    && reply.found
+                {
+                    let region = Some(reply.region);
+                    let _ = crate::store::kv_cache_set(&cache_key, &region, 3600).await;
+                    return Ok(region);
                 }
             }
             Err(e) => {
@@ -295,7 +204,7 @@ pub async fn lookup_region(email_hash: &str) -> Result<Option<String>, String> {
     }
 
     // Not found anywhere — cache the negative result (shorter TTL)
-    let _ = crate::store::kv_cache_set::<Option<String>>(&cache_key, &None, 300);
+    let _ = crate::store::kv_cache_set::<Option<String>>(&cache_key, &None, 300).await;
     Ok(None)
 }
 
@@ -305,39 +214,72 @@ struct LookupReply {
     region: String,
 }
 
-/// HTTP GET for cross-region internal calls. Uses wstd high-level API.
+/// HTTP GET for cross-region internal calls.
 async fn internal_http_get(url: &str) -> Result<Vec<u8>, String> {
-    use wstd::http::{Body, Client};
-
-    let mut builder = wstd::http::Request::builder()
-        .method(wstd::http::Method::GET)
-        .uri(url)
-        .header("accept", "application/json");
-
-    // Attach shared secret if configured
+    let mut headers = vec![("accept", "application/json")];
+    let secret_owned;
     if let Some(secret) = crate::store::internal_auth_secret() {
-        builder = builder.header("x-internal-auth", secret);
+        secret_owned = secret;
+        headers.push(("x-internal-auth", &secret_owned));
     }
-
-    let request = builder
-        .body(Body::empty())
-        .map_err(|e| format!("build request: {e}"))?;
-
-    let response = Client::new()
-        .send(request)
-        .await
-        .map_err(|e| format!("HTTP request failed: {e}"))?;
-
-    let status = response.status();
-    let mut resp_body = response.into_body();
-    let bytes = resp_body
-        .contents()
-        .await
-        .map_err(|e| format!("read body: {e}"))?;
-
-    if !status.is_success() {
-        return Err(format!("http {}", status.as_u16()));
+    let (status, body) = crate::http_client::get_bytes(url, &headers).await?;
+    if !(200..300).contains(&status) {
+        return Err(format!("http {status}"));
     }
+    Ok(body)
+}
 
-    Ok(bytes.to_vec())
+/// Replicate a tenant or client mutation to all remote regions.
+/// `op` is "put" or "delete".  `kind` is "tenant" or "client".
+/// Fire-and-forget: failures are logged but do not block the caller.
+pub async fn replicate_to_regions(
+    op: &str,
+    kind: &str,
+    id: &str,
+    data: Option<&serde_json::Value>,
+) {
+    let self_region = crate::store::region_id().unwrap_or_default();
+    let internal_urls = crate::store::region_internal_urls();
+
+    let payload = serde_json::json!({
+        "op": op,
+        "kind": kind,
+        "id": id,
+        "data": data,
+    });
+    let payload_str = payload.to_string();
+
+    for (region_name, base_url) in &internal_urls {
+        if *region_name == self_region {
+            continue;
+        }
+        let url = format!("{}/internal/replicate", base_url.trim_end_matches('/'));
+        let mut headers: Vec<(&str, &str)> = Vec::new();
+        let secret_owned;
+        if let Some(secret) = crate::store::internal_auth_secret() {
+            secret_owned = secret;
+            headers.push(("x-internal-auth", &secret_owned));
+        }
+        match crate::http_client::post_json(&url, &payload_str, &headers).await {
+            Ok((status, _)) if (200..300).contains(&status) => {
+                crate::logger::info(
+                    "cross_region.replicate_ok",
+                    serde_json::json!({ "region": region_name, "kind": kind, "op": op, "id": id }),
+                );
+            }
+            Ok((status, body)) => {
+                let body_str = String::from_utf8_lossy(&body);
+                crate::logger::warn(
+                    "cross_region.replicate_failed",
+                    serde_json::json!({ "region": region_name, "status": status, "body": body_str.chars().take(200).collect::<String>() }),
+                );
+            }
+            Err(e) => {
+                crate::logger::warn(
+                    "cross_region.replicate_error",
+                    serde_json::json!({ "region": region_name, "error": e }),
+                );
+            }
+        }
+    }
 }

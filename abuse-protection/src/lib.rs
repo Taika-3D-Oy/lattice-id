@@ -3,88 +3,144 @@ mod bindings {
     wit_bindgen::generate!({
         world: "abuse-protection",
         path: "wit",
+        async: [
+            "import:wasmcloud:messaging/consumer@0.2.0#request",
+            "export:taika3d:lid/abuse#check-rate",
+            "export:taika3d:lid/abuse#record-metric",
+        ],
+        generate_all,
     });
 }
 
+use base64::Engine;
 use bindings::exports::taika3d::lid::abuse::Guest;
-use bindings::taika3d::lid::keyvalue_nats_cas as kv;
-use serde::{Deserialize, Serialize};
+use bindings::wasi::config::store as config_store;
+use bindings::wasmcloud::messaging::consumer;
 
 struct AbuseProtection;
 
-/// Sanitize a key for NATS JetStream KV compatibility.
-/// NATS KV keys only allow: A-Z, a-z, 0-9, '-', '_', '/', '=', '.' (middle only).
-fn sanitize_key(key: &str) -> String {
-    key.replace(':', "--").replace('@', "_at_")
+const TIMEOUT_MS: u32 = 5000;
+
+fn rate_limits_table() -> String {
+    let prefix = config_store::get("kv_prefix")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "lid".to_string());
+    format!("{prefix}-abuse-rate-limits")
 }
 
-#[derive(Serialize, Deserialize, Default)]
-struct WindowState {
-    timestamps: Vec<u64>,
+fn ldb_tenant() -> Option<String> {
+    config_store::get("ldb_tenant")
+        .ok()
+        .flatten()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// Send a JSON request to lattice-db via wasmcloud:messaging and parse the response.
+/// When `ldb_tenant` config is set, injects `"_partition"` for lattice-db partitioned mode.
+async fn ldb_request(
+    subject: &str,
+    payload: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let body = if let Some(tenant) = ldb_tenant() {
+        let mut p = payload.clone();
+        p.as_object_mut()
+            .unwrap()
+            .insert("_partition".to_string(), serde_json::Value::String(tenant));
+        serde_json::to_vec(&p).map_err(|e| format!("serialize: {e}"))?
+    } else {
+        serde_json::to_vec(payload).map_err(|e| format!("serialize: {e}"))?
+    };
+    let resp = consumer::request(subject.to_string(), body, TIMEOUT_MS).await?;
+    let val: serde_json::Value =
+        serde_json::from_slice(&resp.body).map_err(|e| format!("parse response: {e}"))?;
+    if let Some(err) = val.get("error").and_then(|v| v.as_str()) {
+        return Err(err.to_string());
+    }
+    Ok(val)
 }
 
 impl Guest for AbuseProtection {
-    fn check_rate(key: String, limit: u64, window_secs: u64) -> Result<(bool, u64), String> {
-        let key = sanitize_key(&key);
-        let bucket = kv::open("lid-abuse-rate-limits")
-            .map_err(|e| format!("failed to open bucket: {e:?}"))?;
-
+    async fn check_rate(key: String, limit: u64, window_secs: u64) -> Result<(bool, u64), String> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| e.to_string())?
             .as_secs();
-        
-        let cutoff = now.saturating_sub(window_secs);
 
-        // Optimistic concurrency control retry loop
-        for _ in 0..10 {
-            let entry = bucket.get(&key)
-                .map_err(|e| format!("get failed: {e:?}"))?;
-            
-            let (mut state, revision) = if let Some(e) = &entry {
-                let s = serde_json::from_slice::<WindowState>(&e.value)
-                    .map_err(|e| format!("parse failed: {e}"))?;
-                (s, Some(e.revision))
-            } else {
-                (WindowState::default(), None)
+        // Bucket key: rate:{key}:{window_start}
+        // Each window is a counter stored in lattice-db with TTL.
+        let window_start = now - (now % window_secs);
+        let db_key = format!("rate:{}:{}", key, window_start);
+        let table = rate_limits_table();
+
+        // Retry loop to ensure the increment is actually recorded
+        const MAX_RETRIES: usize = 5;
+        for _attempt in 0..MAX_RETRIES {
+            // Read current counter with revision
+            let payload = serde_json::json!({ "table": table, "key": db_key });
+            let (count, revision) = match ldb_request("ldb.get", &payload).await {
+                Ok(resp) => {
+                    let value_b64 = resp.get("value").and_then(|v| v.as_str()).unwrap_or("MA==");
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(value_b64)
+                        .unwrap_or_default();
+                    let count_str = String::from_utf8_lossy(&bytes);
+                    let count: u64 = count_str.trim().parse().unwrap_or(0);
+                    let revision = resp.get("revision").and_then(|v| v.as_u64()).unwrap_or(0);
+                    (count, revision)
+                }
+                Err(e) if e.contains("not found") => (0u64, 0u64),
+                Err(e) => return Err(format!("rate limit get: {e}")),
             };
 
-            // Remove expired entries
-            state.timestamps.retain(|&t| t > cutoff);
-
-            let count = state.timestamps.len() as u64;
             if count >= limit {
                 return Ok((false, 0));
             }
 
-            // In-memory sliding window: push CURRENT timestamp
-            state.timestamps.push(now);
-            
-            let new_data = serde_json::to_vec(&state)
-                .map_err(|e| format!("serialize failed: {e}"))?;
+            // Increment counter via CAS (or create if first hit)
+            let new_count = (count + 1).to_string();
+            let new_value = base64::engine::general_purpose::STANDARD.encode(new_count.as_bytes());
 
-            // Atomic CAS using revision
-            let result = match revision {
-                Some(rev) => bucket.swap(&key, &new_data, rev),
-                None => bucket.create(&key, &new_data),
-            };
-
-            match result {
-                Ok(_new_rev) => {
-                    return Ok((true, limit - count - 1));
+            if revision == 0 {
+                // First hit in this window — atomic create with TTL
+                let payload = serde_json::json!({
+                    "table": table,
+                    "key": db_key,
+                    "value": new_value,
+                    "ttl_seconds": window_secs + 10,
+                });
+                match ldb_request("ldb.create", &payload).await {
+                    Ok(_) => return Ok((true, limit - count - 1)),
+                    Err(e) if e.contains("already exists") => {
+                        continue; // retry — re-read the real count and CAS
+                    }
+                    Err(e) => return Err(format!("rate limit create: {e}")),
                 }
-                Err(kv::Error::RevisionMismatch) | Err(kv::Error::KeyExists) => {
-                    // Contention, retry
-                    continue;
+            } else {
+                // Existing counter — CAS update
+                let payload = serde_json::json!({
+                    "table": table,
+                    "key": db_key,
+                    "value": new_value,
+                    "revision": revision,
+                });
+                match ldb_request("ldb.cas", &payload).await {
+                    Ok(_) => return Ok((true, limit - count - 1)),
+                    Err(e) if e.contains("revision mismatch") => {
+                        continue; // retry with fresh revision
+                    }
+                    Err(e) => return Err(format!("rate limit cas: {e}")),
                 }
-                Err(e) => return Err(format!("swap failed: {e:?}")),
             }
         }
 
-        Err("too much contention on rate limit key".to_string())
+        // If all retries exhausted, allow the request but don't increment
+        // (fail-open to avoid blocking legitimate traffic)
+        Ok((true, 0))
     }
 
-    fn record_metric(_name: String, _labels: Vec<(String, String)>) -> Result<(), String> {
+    async fn record_metric(_name: String, _labels: Vec<(String, String)>) -> Result<(), String> {
         Ok(())
     }
 }

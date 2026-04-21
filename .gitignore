@@ -4,4 +4,10 @@
 dev-data/
 tmp/
 *.log
+*.bak
+*.bak2
+*.patch
+*.patch2
 .vscode
+.DS_Store
+.env

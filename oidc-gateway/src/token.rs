@@ -1,9 +1,9 @@
-use wstd::http::{Body, Response, StatusCode};
+use http::{Response, StatusCode};
 
 use crate::{jwt, store, util};
 
 /// RFC 6749 §5.2 compliant error response for the token endpoint.
-fn token_error(status: StatusCode, error: &str, description: &str) -> Response<Body> {
+fn token_error(status: StatusCode, error: &str, description: &str) -> Response<String> {
     let body = serde_json::json!({
         "error": error,
         "error_description": description,
@@ -12,17 +12,28 @@ fn token_error(status: StatusCode, error: &str, description: &str) -> Response<B
         .status(status)
         .header("content-type", "application/json")
         .header("cache-control", "no-store")
-        .body(serde_json::to_string(&body).unwrap_or_default().into())
+        .body(serde_json::to_string(&body).unwrap_or_default())
         .unwrap()
 }
 
 /// Map an internal error string to a RFC 6749 §5.2 error response.
-fn map_token_error(e: &str) -> Response<Body> {
-    if e.contains("client_id") || e.contains("client_secret") || e.contains("client authentication") {
+fn map_token_error(e: &str) -> Response<String> {
+    if e.contains("client_id") || e.contains("client_secret") || e.contains("client authentication")
+    {
         token_error(StatusCode::UNAUTHORIZED, "invalid_client", e)
     } else if e.contains("grant_type") || e.contains("not authorized to use") {
         token_error(StatusCode::BAD_REQUEST, "unauthorized_client", e)
-    } else if e.contains("code") || e.contains("expired") || e.contains("PKCE") || e.contains("redirect_uri") || e.contains("refresh token") || e.contains("user not found") || e.contains("mismatch") || e.contains("consumed") || e.contains("revoked") || e.contains("replay") {
+    } else if e.contains("code")
+        || e.contains("expired")
+        || e.contains("PKCE")
+        || e.contains("redirect_uri")
+        || e.contains("refresh token")
+        || e.contains("user not found")
+        || e.contains("mismatch")
+        || e.contains("consumed")
+        || e.contains("revoked")
+        || e.contains("replay")
+    {
         token_error(StatusCode::BAD_REQUEST, "invalid_grant", e)
     } else if e.contains("rate") || e.contains("too many") {
         token_error(StatusCode::TOO_MANY_REQUESTS, "invalid_request", e)
@@ -34,18 +45,22 @@ fn map_token_error(e: &str) -> Response<Body> {
 /// Parse client credentials from HTTP Basic Authorization header (RFC 6749 §2.3.1).
 fn parse_basic_auth(auth_header: Option<&str>) -> Option<(String, String)> {
     let header = auth_header?;
-    let encoded = header.strip_prefix("Basic ").or_else(|| header.strip_prefix("basic "))?;
-    let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded).ok()?;
+    let encoded = header
+        .strip_prefix("Basic ")
+        .or_else(|| header.strip_prefix("basic "))?;
+    let decoded =
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded).ok()?;
     let text = String::from_utf8(decoded).ok()?;
     let (client_id, client_secret) = text.split_once(':')?;
-    Some((
-        util::url_decode(client_id),
-        util::url_decode(client_secret),
-    ))
+    Some((util::url_decode(client_id), util::url_decode(client_secret)))
 }
 
 /// Handle POST /token — authorization_code and refresh_token grants.
-pub async fn handle(body_bytes: &[u8], issuer: &str, auth_header: Option<&str>) -> Result<Response<Body>, String> {
+pub async fn handle(
+    body_bytes: &[u8],
+    issuer: &str,
+    auth_header: Option<&str>,
+) -> Result<Response<String>, String> {
     let mut form = util::parse_form(body_bytes);
 
     // Support client_secret_basic: override form credentials with Basic auth if present
@@ -83,7 +98,15 @@ pub async fn handle(body_bytes: &[u8], issuer: &str, auth_header: Option<&str>) 
     let result = match grant_type {
         "authorization_code" => handle_code_exchange(&form, issuer).await,
         "refresh_token" => handle_refresh(&form, issuer).await,
-        _ => return Ok(token_error(StatusCode::BAD_REQUEST, "unsupported_grant_type", &format!("unsupported grant_type: {grant_type}"))),
+        "client_credentials" => handle_client_credentials(&form, issuer).await,
+        "urn:ietf:params:oauth:grant-type:device_code" => handle_device_code(&form, issuer).await,
+        _ => {
+            return Ok(token_error(
+                StatusCode::BAD_REQUEST,
+                "unsupported_grant_type",
+                &format!("unsupported grant_type: {grant_type}"),
+            ));
+        }
     };
 
     match result {
@@ -95,7 +118,7 @@ pub async fn handle(body_bytes: &[u8], issuer: &str, auth_header: Option<&str>) 
 async fn handle_code_exchange(
     form: &[(String, String)],
     issuer: &str,
-) -> Result<Response<Body>, String> {
+) -> Result<Response<String>, String> {
     let get = |key: &str| -> Option<&str> {
         form.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
     };
@@ -106,10 +129,12 @@ async fn handle_code_exchange(
     let client_id = get("client_id").ok_or("missing client_id")?;
     let client_secret = get("client_secret");
 
-    // Load signing keys from KV (persisted by core-service)
     // Verify client
-    let client = verify_client(client_id, client_secret)?;
-    if !client.grant_types.contains(&"authorization_code".to_string()) {
+    let client = verify_client(client_id, client_secret).await?;
+    if !client
+        .grant_types
+        .contains(&"authorization_code".to_string())
+    {
         return Err(format!(
             "client '{}' is not authorized to use grant_type 'authorization_code'",
             client_id
@@ -117,7 +142,8 @@ async fn handle_code_exchange(
     }
 
     // CAS: get auth code with revision for atomic consumption
-    let (auth_code, revision) = store::get_auth_code_cas(code)?
+    let (auth_code, revision) = store::get_auth_code_cas(code)
+        .await?
         .ok_or("invalid or expired code")?;
 
     if auth_code.client_id != client_id {
@@ -139,9 +165,11 @@ async fn handle_code_exchange(
 
     // CAS: atomically consume the auth code (prevents double-spend)
     store::consume_auth_code(code, revision)
+        .await
         .map_err(|_| "authorization code already consumed".to_string())?;
 
-    let user = store::get_user(&auth_code.user_id)?
+    let user = store::get_user(&auth_code.user_id)
+        .await?
         .ok_or("user not found")?;
 
     let nonce = if auth_code.nonce.is_empty() {
@@ -166,44 +194,54 @@ async fn handle_code_exchange(
         &auth_code.requested_id_token_claims,
         &auth_code.requested_userinfo_claims,
         &auth_code.extra_claims,
-    );
+    )
+    .await;
 
     // Sign tokens via key-manager component
-    let access_token = jwt::sign(&access_claims)?;
-    let id_token = jwt::sign(&id_claims)?;
+    let access_token = jwt::sign(&access_claims).await?;
+
+    // OIDC Core §3.1.3.6: at_hash is REQUIRED in id_token from the token endpoint
+    let mut id_claims = id_claims;
+    id_claims["at_hash"] = serde_json::json!(compute_at_hash(&access_token));
+    let id_token = jwt::sign_id_token_for_client(&id_claims, &client).await?;
 
     // Create refresh token
     let refresh_raw = store::random_hex(32);
     let refresh_hash = hex_sha256(&refresh_raw);
+    let now = store::unix_now();
     let refresh_entry = store::RefreshEntry {
         user_id: user.id,
         client_id: client_id.to_string(),
-        expires_at: store::unix_now() + 86400 * 30,
+        expires_at: now + 86400 * 30,
         scope: auth_code.scope.clone(),
-        version: store::unix_now(),
+        version: now,
         auth_time,
         amr: auth_code.amr.clone(),
         acr: auth_code.acr.clone(),
         requested_id_token_claims: auth_code.requested_id_token_claims.clone(),
         requested_userinfo_claims: auth_code.requested_userinfo_claims.clone(),
+        issued_at: now,
     };
-    store::save_refresh_token(&refresh_hash, &refresh_entry)?;
+    store::save_refresh_token(&refresh_hash, &refresh_entry).await?;
 
     // Clean up consumed auth code
-    let _ = store::delete_auth_code(code);
+    let _ = store::delete_auth_code(code).await;
 
     // Record metrics
     for token_type in ["access", "id_token", "refresh_token"] {
         let _ = crate::service_client::increment_metric(
             "lattice_id_token_issued_total",
-            &[("grant_type", "authorization_code"), ("token_type", token_type)],
+            &[
+                ("grant_type", "authorization_code"),
+                ("token_type", token_type),
+            ],
         )
         .await;
     }
 
     // Only issue refresh token when offline_access scope is present or client is confidential
-    let has_offline_access = auth_code.scope.split(' ').any(|s| s == "offline_access")
-        || client.client_secret.is_some();
+    let has_offline_access =
+        auth_code.scope.split(' ').any(|s| s == "offline_access") || client.client_secret.is_some();
 
     let mut response = serde_json::json!({
         "access_token": access_token,
@@ -216,18 +254,21 @@ async fn handle_code_exchange(
         response["refresh_token"] = serde_json::json!(refresh_raw);
     } else {
         // Clean up the refresh token we just stored — it won't be used
-        let _ = store::delete_refresh_token(&refresh_hash);
+        let _ = store::delete_refresh_token(&refresh_hash).await;
     }
 
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/json")
         .header("cache-control", "no-store")
-        .body(serde_json::to_string(&response).unwrap_or_default().into())
+        .body(serde_json::to_string(&response).unwrap_or_default())
         .unwrap())
 }
 
-async fn handle_refresh(form: &[(String, String)], issuer: &str) -> Result<Response<Body>, String> {
+async fn handle_refresh(
+    form: &[(String, String)],
+    issuer: &str,
+) -> Result<Response<String>, String> {
     let get = |key: &str| -> Option<&str> {
         form.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
     };
@@ -236,7 +277,7 @@ async fn handle_refresh(form: &[(String, String)], issuer: &str) -> Result<Respo
     let client_id = get("client_id").ok_or("missing client_id")?;
     let client_secret = get("client_secret");
 
-    let client = verify_client(client_id, client_secret)?;
+    let client = verify_client(client_id, client_secret).await?;
     if !client.grant_types.contains(&"refresh_token".to_string()) {
         return Err(format!(
             "client '{}' is not authorized to use grant_type 'refresh_token'",
@@ -247,21 +288,22 @@ async fn handle_refresh(form: &[(String, String)], issuer: &str) -> Result<Respo
     let refresh_hash = hex_sha256(refresh_token);
 
     // CAS: get refresh token with revision for atomic consumption
-    let (entry, revision) = match store::get_refresh_token_cas(&refresh_hash)? {
+    let (entry, revision) = match store::get_refresh_token_cas(&refresh_hash).await? {
         Some(pair) => pair,
         None => {
             // Replay detection: check if token was previously consumed
-            if let Ok(Some(user_id)) = store::get_consumed_refresh(&refresh_hash) {
-                let _ = store::revoke_user_sessions(&user_id);
-                let _ = store::delete_user_refresh_tokens(&user_id);
+            if let Ok(Some(user_id)) = store::get_consumed_refresh(&refresh_hash).await {
+                let issuer = store::config_value("issuer_url")
+                    .unwrap_or_else(|| "http://localhost".to_string());
+                crate::backchannel::notify_all_clients(&user_id, &issuer).await;
+                let _ = store::revoke_user_sessions(&user_id).await;
+                let _ = store::delete_user_refresh_tokens(&user_id).await;
                 let _ = crate::service_client::increment_metric(
                     "lattice_id_refresh_usage_total",
                     &[("result", "replay_detected")],
                 )
                 .await;
-                return Err(
-                    "refresh token replay detected — all sessions revoked".into(),
-                );
+                return Err("refresh token replay detected — all sessions revoked".into());
             }
             let _ = crate::service_client::increment_metric(
                 "lattice_id_refresh_usage_total",
@@ -275,8 +317,9 @@ async fn handle_refresh(form: &[(String, String)], issuer: &str) -> Result<Respo
     if entry.client_id != client_id {
         return Err("client_id mismatch".into());
     }
-    if store::unix_now() > entry.expires_at {
-        let _ = store::delete_refresh_token(&refresh_hash);
+    let now = store::unix_now();
+    if now > entry.expires_at {
+        let _ = store::delete_refresh_token(&refresh_hash).await;
         let _ = crate::service_client::increment_metric(
             "lattice_id_refresh_usage_total",
             &[("result", "expired")],
@@ -284,12 +327,30 @@ async fn handle_refresh(form: &[(String, String)], issuer: &str) -> Result<Respo
         .await;
         return Err("refresh token expired".into());
     }
+    // Enforce absolute lifetime cap (default 90 days from first issuance)
+    let absolute_max = store::refresh_absolute_max_secs();
+    let family_issued_at = if entry.issued_at > 0 {
+        entry.issued_at
+    } else {
+        now
+    };
+    if now > family_issued_at + absolute_max {
+        let _ = store::delete_refresh_token(&refresh_hash).await;
+        let _ = crate::service_client::increment_metric(
+            "lattice_id_refresh_usage_total",
+            &[("result", "absolute_expired")],
+        )
+        .await;
+        return Err("refresh token family has exceeded maximum lifetime".into());
+    }
 
     // CAS: atomically consume the old refresh token
     store::consume_refresh_token(&refresh_hash, revision)
+        .await
         .map_err(|_| "refresh token already consumed".to_string())?;
 
-    let user = store::get_user(&entry.user_id)?
+    let user = store::get_user(&entry.user_id)
+        .await?
         .ok_or("user not found")?;
 
     let auth_time = if entry.auth_time == 0 {
@@ -309,10 +370,15 @@ async fn handle_refresh(form: &[(String, String)], issuer: &str) -> Result<Respo
         &entry.requested_id_token_claims,
         &entry.requested_userinfo_claims,
         &[],
-    );
+    )
+    .await;
 
-    let access_token = jwt::sign(&access_claims)?;
-    let id_token = jwt::sign(&id_claims)?;
+    let access_token = jwt::sign(&access_claims).await?;
+
+    // OIDC Core §3.1.3.6: at_hash is REQUIRED in id_token from the token endpoint
+    let mut id_claims = id_claims;
+    id_claims["at_hash"] = serde_json::json!(compute_at_hash(&access_token));
+    let id_token = jwt::sign_id_token_for_client(&id_claims, &client).await?;
 
     // Issue new refresh token
     let new_refresh_raw = store::random_hex(32);
@@ -320,7 +386,8 @@ async fn handle_refresh(form: &[(String, String)], issuer: &str) -> Result<Respo
     let new_entry = store::RefreshEntry {
         user_id: entry.user_id.clone(),
         client_id: client_id.to_string(),
-        expires_at: store::unix_now() + 86400 * 30,
+        // Sliding window capped at absolute max
+        expires_at: (now + 86400 * 30).min(family_issued_at + absolute_max),
         scope: entry.scope.clone(),
         version: entry.version,
         auth_time,
@@ -328,12 +395,14 @@ async fn handle_refresh(form: &[(String, String)], issuer: &str) -> Result<Respo
         acr: entry.acr.clone(),
         requested_id_token_claims: entry.requested_id_token_claims.clone(),
         requested_userinfo_claims: entry.requested_userinfo_claims.clone(),
+        // Carry original issuance timestamp forward through the family
+        issued_at: family_issued_at,
     };
-    store::save_refresh_token(&new_refresh_hash, &new_entry)?;
+    store::save_refresh_token(&new_refresh_hash, &new_entry).await?;
 
     // Mark old token as consumed for replay detection, then delete
-    store::mark_refresh_consumed(&refresh_hash, &entry.user_id)?;
-    let _ = store::delete_refresh_token(&refresh_hash);
+    store::mark_refresh_consumed(&refresh_hash, &entry.user_id).await?;
+    let _ = store::delete_refresh_token(&refresh_hash).await;
 
     let _ = crate::service_client::increment_metric(
         "lattice_id_refresh_usage_total",
@@ -361,25 +430,279 @@ async fn handle_refresh(form: &[(String, String)], issuer: &str) -> Result<Respo
         .status(StatusCode::OK)
         .header("content-type", "application/json")
         .header("cache-control", "no-store")
-        .body(serde_json::to_string(&response).unwrap_or_default().into())
+        .body(serde_json::to_string(&response).unwrap_or_default())
         .unwrap())
 }
 
-/// Handle POST /token/revoke — RFC 7009 token revocation.
-pub async fn handle_revoke(body_bytes: &[u8]) -> Result<Response<Body>, String> {
-    let form = util::parse_form(body_bytes);
+/// Handle POST /token — client_credentials grant (RFC 6749 §4.4).
+/// Issues a machine-to-machine access token; no user identity, no id_token.
+async fn handle_client_credentials(
+    form: &[(String, String)],
+    issuer: &str,
+) -> Result<Response<String>, String> {
+    let get = |key: &str| -> Option<&str> {
+        form.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    };
+
+    let client_id = get("client_id").ok_or("missing client_id")?;
+    let client_secret =
+        get("client_secret").ok_or("client_secret required for client_credentials grant")?;
+    let scope = get("scope").unwrap_or("").to_string();
+
+    // Only confidential clients may use client_credentials
+    let client = authenticate_confidential_client(client_id, client_secret).await?;
+    if !client
+        .grant_types
+        .contains(&"client_credentials".to_string())
+    {
+        return Err(format!(
+            "client '{}' is not authorized to use grant_type 'client_credentials'",
+            client_id
+        ));
+    }
+
+    let now = store::unix_now();
+    let access_claims = serde_json::json!({
+        "iss": issuer,
+        "sub": client_id,
+        "aud": client_id,
+        "exp": now + 3600,
+        "nbf": now - 30,
+        "iat": now,
+        "scope": scope,
+        "token_type": "client_credentials",
+        "client_id": client_id,
+    });
+
+    let access_token = jwt::sign(&access_claims).await?;
+
+    let _ = crate::service_client::increment_metric(
+        "lattice_id_token_issued_total",
+        &[
+            ("grant_type", "client_credentials"),
+            ("token_type", "access"),
+        ],
+    )
+    .await;
+
+    let response = serde_json::json!({
+        "access_token": access_token,
+        "token_type": "Bearer",
+        "expires_in": 3600,
+        "scope": scope,
+    });
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .header("cache-control", "no-store")
+        .body(serde_json::to_string(&response).unwrap_or_default())
+        .unwrap())
+}
+
+/// Handle POST /token — device_code grant (RFC 8628 §3.4).
+/// Client polls here until user approves or the code expires.
+async fn handle_device_code(
+    form: &[(String, String)],
+    issuer: &str,
+) -> Result<Response<String>, String> {
+    let get = |key: &str| -> Option<&str> {
+        form.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    };
+
+    let device_code = get("device_code").ok_or("missing device_code")?;
+    let client_id = get("client_id").ok_or("missing client_id")?;
+    let client_secret = get("client_secret");
+
+    // Authenticate client and fetch its config (needed for id_token alg).
+    let _ = verify_client(client_id, client_secret).await?;
+    let client = store::get_client(client_id)
+        .await?
+        .ok_or("client not found")?;
+
+    // Enforce minimum poll interval (5 s) per RFC 8628 §3.5
+    let rate_key = format!("device_poll:{device_code}");
+    match crate::service_client::check_rate(&rate_key, 1, 5).await {
+        Ok((false, _)) => {
+            return Ok(token_error(
+                StatusCode::BAD_REQUEST,
+                "slow_down",
+                "polling too fast, wait 5 seconds",
+            ));
+        }
+        Err(e) => crate::logger::error_message("rate_limit.device_poll_failed", e),
+        _ => {}
+    }
+
+    let dc = match store::get_device_code(device_code).await? {
+        Some(dc) => dc,
+        None => {
+            return Ok(token_error(
+                StatusCode::BAD_REQUEST,
+                "expired_token",
+                "device code not found or expired",
+            ));
+        }
+    };
+
+    if dc.client_id != client_id {
+        return Ok(token_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "client_id mismatch",
+        ));
+    }
+    if store::unix_now() > dc.expires_at {
+        let _ = store::delete_device_code(device_code).await;
+        return Ok(token_error(
+            StatusCode::BAD_REQUEST,
+            "expired_token",
+            "device code has expired",
+        ));
+    }
+
+    match dc.status.as_str() {
+        "pending" => Ok(token_error(
+            StatusCode::BAD_REQUEST,
+            "authorization_pending",
+            "user has not yet approved the device",
+        )),
+        "denied" => {
+            let _ = store::delete_device_code(device_code).await;
+            Ok(token_error(
+                StatusCode::BAD_REQUEST,
+                "access_denied",
+                "user denied the device request",
+            ))
+        }
+        "approved" => {
+            let user_id = dc
+                .user_id
+                .as_deref()
+                .ok_or("approved device code missing user_id")?;
+            let user = store::get_user(user_id).await?.ok_or("user not found")?;
+            if user.status != "active" {
+                return Ok(token_error(
+                    StatusCode::BAD_REQUEST,
+                    "access_denied",
+                    "account not active",
+                ));
+            }
+
+            let now = store::unix_now();
+            let (access_claims, id_claims) = build_claims(
+                issuer,
+                &user,
+                client_id,
+                None,
+                now,
+                &["device".to_string()],
+                None,
+                &dc.scope,
+                &[],
+                &[],
+                &[],
+            )
+            .await;
+
+            let access_token = jwt::sign(&access_claims).await?;
+            let mut id_claims = id_claims;
+            id_claims["at_hash"] = serde_json::json!(compute_at_hash(&access_token));
+            let id_token = jwt::sign_id_token_for_client(&id_claims, &client).await?;
+
+            // Refresh token — only if offline_access requested
+            let has_offline = dc.scope.split(' ').any(|s| s == "offline_access");
+            let refresh_raw = store::random_hex(32);
+            let refresh_hash = hex_sha256(&refresh_raw);
+            let refresh_entry = store::RefreshEntry {
+                user_id: user.id.clone(),
+                client_id: client_id.to_string(),
+                expires_at: now + 86400 * 30,
+                scope: dc.scope.clone(),
+                version: now,
+                auth_time: now,
+                amr: vec!["device".to_string()],
+                acr: None,
+                requested_id_token_claims: vec![],
+                requested_userinfo_claims: vec![],
+                issued_at: now,
+            };
+            store::save_refresh_token(&refresh_hash, &refresh_entry).await?;
+
+            let _ = store::delete_device_code(device_code).await;
+
+            let _ = crate::service_client::increment_metric(
+                "lattice_id_token_issued_total",
+                &[("grant_type", "device_code"), ("token_type", "access")],
+            )
+            .await;
+
+            let mut response = serde_json::json!({
+                "access_token": access_token,
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "id_token": id_token,
+                "scope": dc.scope,
+            });
+            if has_offline {
+                response["refresh_token"] = serde_json::json!(refresh_raw);
+            } else {
+                let _ = store::delete_refresh_token(&refresh_hash).await;
+            }
+
+            Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .header("cache-control", "no-store")
+                .body(serde_json::to_string(&response).unwrap_or_default())
+                .unwrap())
+        }
+        _ => Ok(token_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "unknown device code status",
+        )),
+    }
+}
+
+/// Handle POST /token — token revocation (RFC 7009).
+pub async fn handle_revoke(
+    body_bytes: &[u8],
+    auth_header: Option<&str>,
+) -> Result<Response<String>, String> {
+    let mut form = util::parse_form(body_bytes);
+
+    // Support client_secret_basic (RFC 7009 §2.1)
+    if let Some((basic_id, basic_secret)) = parse_basic_auth(auth_header) {
+        let form_has_secret = form.iter().any(|(k, _)| k == "client_secret");
+        if !form_has_secret {
+            form.retain(|(k, _)| k != "client_id");
+            form.push(("client_id".to_string(), basic_id));
+            form.push(("client_secret".to_string(), basic_secret));
+        }
+    }
+
     let get = |key: &str| -> Option<&str> {
         form.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
     };
 
     let token = get("token").ok_or("missing token")?;
     let token_type_hint = get("token_type_hint");
+    let client_id = get("client_id");
+    let client_secret = get("client_secret");
+
+    // Authenticate the client if credentials are provided (RFC 7009 §2.1).
+    // Public clients may revoke without a secret, but if a secret is given
+    // it must be valid.
+    if let Some(cid) = client_id {
+        let _ = verify_client(cid, client_secret).await?;
+    }
 
     // Try to revoke as refresh token first (most common case)
     let revoked_refresh = if token_type_hint != Some("access_token") {
         let hash = hex_sha256(token);
-        if store::get_refresh_token(&hash)?.is_some() {
-            store::delete_refresh_token(&hash)?;
+        if store::get_refresh_token(&hash).await?.is_some() {
+            store::delete_refresh_token(&hash).await?;
             true
         } else {
             false
@@ -391,18 +714,22 @@ pub async fn handle_revoke(body_bytes: &[u8]) -> Result<Response<Body>, String> 
     // Per RFC 7009, always return 200 OK regardless of whether the token was found
     // (to prevent token existence probing)
     if revoked_refresh {
-        let _ = store::log_audit("token_revoked", "", "", "refresh_token");
+        let _ = store::log_audit("token_revoked", "", "", "refresh_token").await;
     }
 
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header("cache-control", "no-store")
-        .body(Body::empty())
+        .body(String::new())
         .unwrap())
 }
 
 /// Handle POST /token/introspect — RFC 7662 token introspection.
-pub async fn handle_introspect(body_bytes: &[u8], issuer: &str, auth_header: Option<&str>) -> Result<Response<Body>, String> {
+pub async fn handle_introspect(
+    body_bytes: &[u8],
+    issuer: &str,
+    auth_header: Option<&str>,
+) -> Result<Response<String>, String> {
     let mut form = util::parse_form(body_bytes);
 
     // Support client_secret_basic for introspection
@@ -423,7 +750,7 @@ pub async fn handle_introspect(body_bytes: &[u8], issuer: &str, auth_header: Opt
     let client_id = get("client_id").ok_or("missing client_id")?;
     let client_secret = get("client_secret").ok_or("missing client_secret")?;
 
-    let client = match authenticate_confidential_client(client_id, client_secret) {
+    let client = match authenticate_confidential_client(client_id, client_secret).await {
         Ok(client) => client,
         Err(_) => {
             return Ok(Response::builder()
@@ -431,12 +758,14 @@ pub async fn handle_introspect(body_bytes: &[u8], issuer: &str, auth_header: Opt
                 .header("content-type", "application/json")
                 .header("cache-control", "no-store")
                 .header("www-authenticate", "Bearer realm=\"token-introspection\"")
-                .body(r#"{"error":"invalid_client"}"#.into())
+                .body(r#"{"error":"invalid_client"}"#.to_string())
                 .unwrap());
         }
     };
 
-    match crate::service_client::check_rate(&format!("introspect:{}", client.client_id), 100, 60).await {
+    match crate::service_client::check_rate(&format!("introspect:{}", client.client_id), 100, 60)
+        .await
+    {
         Ok((false, _)) => {
             return Ok(json_response(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -447,26 +776,29 @@ pub async fn handle_introspect(body_bytes: &[u8], issuer: &str, auth_header: Opt
         _ => {}
     }
 
-    let response = match crate::service_client::verify_token_scoped(token, Some(issuer), None, None).await {
-        Ok(claims) => build_introspection_response(&claims),
-        Err(_) => serde_json::json!({ "active": false }),
-    };
+    let response =
+        match crate::service_client::verify_token_scoped(token, Some(issuer), None, None).await {
+            Ok(claims) => build_introspection_response(&claims),
+            Err(_) => serde_json::json!({ "active": false }),
+        };
 
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/json")
         .header("cache-control", "no-store")
-        .body(serde_json::to_string(&response).unwrap_or_default().into())
+        .body(serde_json::to_string(&response).unwrap_or_default())
         .unwrap())
 }
 
-fn authenticate_confidential_client(
+async fn authenticate_confidential_client(
     client_id: &str,
     client_secret: &str,
 ) -> Result<store::OidcClient, String> {
     use subtle::ConstantTimeEq;
 
-    let client = store::get_client(client_id)?.ok_or("invalid client authentication")?;
+    let client = store::get_client(client_id)
+        .await?
+        .ok_or("invalid client authentication")?;
     let expected_secret = client
         .client_secret
         .as_deref()
@@ -488,7 +820,22 @@ fn build_introspection_response(claims: &serde_json::Value) -> serde_json::Value
         "active": true,
     });
 
-    for key in ["iss", "sub", "exp", "iat", "nbf", "scope", "client_id", "username", "token_type", "email", "name", "tenant_id", "role", "auth_time"] {
+    for key in [
+        "iss",
+        "sub",
+        "exp",
+        "iat",
+        "nbf",
+        "scope",
+        "client_id",
+        "username",
+        "token_type",
+        "email",
+        "name",
+        "tenant_id",
+        "role",
+        "auth_time",
+    ] {
         if let Some(value) = claims.get(key) {
             response[key] = value.clone();
         }
@@ -498,7 +845,9 @@ fn build_introspection_response(claims: &serde_json::Value) -> serde_json::Value
         response["aud"] = aud.clone();
         if response.get("client_id").is_none() {
             match aud {
-                serde_json::Value::String(value) => response["client_id"] = serde_json::json!(value),
+                serde_json::Value::String(value) => {
+                    response["client_id"] = serde_json::json!(value)
+                }
                 serde_json::Value::Array(values) if values.len() == 1 => {
                     if let Some(value) = values[0].as_str() {
                         response["client_id"] = serde_json::json!(value);
@@ -512,12 +861,12 @@ fn build_introspection_response(claims: &serde_json::Value) -> serde_json::Value
     response
 }
 
-fn json_response(status: StatusCode, value: &serde_json::Value) -> Response<Body> {
+fn json_response(status: StatusCode, value: &serde_json::Value) -> Response<String> {
     Response::builder()
         .status(status)
         .header("content-type", "application/json")
         .header("cache-control", "no-store")
-        .body(serde_json::to_string(value).unwrap_or_default().into())
+        .body(serde_json::to_string(value).unwrap_or_default())
         .unwrap()
 }
 
@@ -528,19 +877,31 @@ fn hex_sha256(input: &str) -> String {
     hash.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-// ── Helpers migrated from core-service ──────────────────────
+/// Compute at_hash per OIDC Core §3.1.3.6:
+/// base64url(left_half(SHA-256(access_token)))
+fn compute_at_hash(access_token: &str) -> String {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use sha2::{Digest, Sha256};
 
-fn verify_client(client_id: &str, client_secret: Option<&str>) -> Result<store::OidcClient, String> {
+    let hash = Sha256::digest(access_token.as_bytes());
+    URL_SAFE_NO_PAD.encode(&hash[..16])
+}
+
+// ── Helpers ──────────────────────────────────────────────────
+
+async fn verify_client(
+    client_id: &str,
+    client_secret: Option<&str>,
+) -> Result<store::OidcClient, String> {
     use subtle::ConstantTimeEq;
 
-    let client = store::get_client(client_id)?
+    let client = store::get_client(client_id)
+        .await?
         .ok_or_else(|| format!("unknown client_id: {client_id}"))?;
 
     if let Some(expected_secret) = &client.client_secret {
         match client_secret {
-            Some(provided)
-                if provided.as_bytes().ct_eq(expected_secret.as_bytes()).into() =>
-            {
+            Some(provided) if provided.as_bytes().ct_eq(expected_secret.as_bytes()).into() => {
                 Ok(client)
             }
             Some(_) => Err("invalid client_secret".into()),
@@ -552,13 +913,10 @@ fn verify_client(client_id: &str, client_secret: Option<&str>) -> Result<store::
 }
 
 fn verify_pkce(code_verifier: &str, code_challenge: &str, method: &str) -> bool {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use sha2::{Digest, Sha256};
     use subtle::ConstantTimeEq;
 
-    if method == "plain" {
-        return code_verifier.as_bytes().ct_eq(code_challenge.as_bytes()).into();
-    }
     if method != "S256" {
         return false;
     }
@@ -569,7 +927,8 @@ fn verify_pkce(code_verifier: &str, code_challenge: &str, method: &str) -> bool 
     computed.as_bytes().ct_eq(code_challenge.as_bytes()).into()
 }
 
-fn build_claims(
+#[allow(clippy::too_many_arguments)]
+async fn build_claims(
     issuer: &str,
     user: &store::User,
     client_id: &str,
@@ -583,7 +942,7 @@ fn build_claims(
     extra_claims: &[(String, String)],
 ) -> (serde_json::Value, serde_json::Value) {
     let now = store::unix_now();
-    let memberships = store::list_user_tenants(&user.id).unwrap_or_default();
+    let memberships = store::list_user_tenants(&user.id).await.unwrap_or_default();
 
     let email_verified = user.status == "active";
     let mut access_claims = serde_json::json!({

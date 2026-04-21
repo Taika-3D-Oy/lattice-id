@@ -3,156 +3,274 @@ mod bindings {
     wit_bindgen::generate!({
         world: "key-manager",
         path: "wit",
+        async: [
+            "import:wasmcloud:messaging/consumer@0.2.0#request",
+            "export:taika3d:lid/keys#get-public-key",
+            "export:taika3d:lid/keys#get-public-keys",
+            "export:taika3d:lid/keys#get-kid",
+            "export:taika3d:lid/keys#sign-jwt",
+        ],
+        generate_all,
     });
 }
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bindings::exports::taika3d::lid::keys::Guest;
-use bindings::taika3d::lid::keyvalue_nats_cas as kv;
+use bindings::wasi::config::store as config_store;
+use bindings::wasmcloud::messaging::consumer;
+use p256::ecdsa::SigningKey as EcSigningKey;
 use rsa::pkcs1v15::SigningKey;
+use rsa::signature::{SignatureEncoding, Signer};
 use rsa::traits::{PrivateKeyParts, PublicKeyParts};
 use rsa::{RsaPrivateKey, RsaPublicKey};
-use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use rsa::signature::{Signer, SignatureEncoding};
-
-const ROTATION_INTERVAL: u64 = 86400; // 24 hours
-const KEY_KV_PATH: &str = "config/signing-keys";
 
 struct KeyManager;
 
-#[derive(Serialize, Deserialize, Clone)]
-struct ExportedKeyStore {
-    current: ExportedSigningKey,
-    previous: Vec<ExportedRetiredKey>,
+struct LoadedKeys {
+    kid: String,
+    rsa_jwk: String,
+    #[allow(dead_code)]
+    ec_kid: String,
+    ec_jwk: String,
+    signing_key: SigningKey<Sha256>,
+    ec_signing_key: EcSigningKey,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-struct ExportedSigningKey {
+const KEY_NAME: &str = "signing-key-v1";
+const EC_KEY_NAME: &str = "signing-key-ec-v1";
+const TIMEOUT_MS: u32 = 5000;
+
+fn keys_table() -> String {
+    let prefix = config_store::get("kv_prefix")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "lid".to_string());
+    format!("{prefix}-keys")
+}
+
+fn ldb_tenant() -> Option<String> {
+    config_store::get("ldb_tenant")
+        .ok()
+        .flatten()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// Send a JSON request to lattice-db via wasmcloud:messaging and parse the response.
+/// When `ldb_tenant` config is set, injects `"_partition"` for lattice-db partitioned mode.
+async fn ldb_request(
+    subject: &str,
+    payload: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let body = if let Some(tenant) = ldb_tenant() {
+        let mut p = payload.clone();
+        p.as_object_mut()
+            .unwrap()
+            .insert("_partition".to_string(), serde_json::Value::String(tenant));
+        serde_json::to_vec(&p).map_err(|e| format!("serialize: {e}"))?
+    } else {
+        serde_json::to_vec(payload).map_err(|e| format!("serialize: {e}"))?
+    };
+    let resp = consumer::request(subject.to_string(), body, TIMEOUT_MS).await?;
+    let val: serde_json::Value =
+        serde_json::from_slice(&resp.body).map_err(|e| format!("parse response: {e}"))?;
+    if let Some(err) = val.get("error").and_then(|v| v.as_str()) {
+        return Err(err.to_string());
+    }
+    Ok(val)
+}
+
+/// Try to load the signing key from lattice-db.
+async fn load_from_db() -> Result<Option<StoredKey>, String> {
+    let payload = serde_json::json!({ "table": keys_table(), "key": KEY_NAME });
+    match ldb_request("ldb.get", &payload).await {
+        Ok(resp) => {
+            let value_b64 = resp
+                .get("value")
+                .and_then(|v| v.as_str())
+                .ok_or("missing value")?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(value_b64)
+                .map_err(|e| format!("base64 decode: {e}"))?;
+            let stored: StoredKey =
+                serde_json::from_slice(&bytes).map_err(|e| format!("deserialize key: {e}"))?;
+            Ok(Some(stored))
+        }
+        Err(e) if e.contains("not found") => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Generate a new RSA key and store it in lattice-db atomically (create = fail if exists).
+async fn generate_and_store() -> Result<StoredKey, String> {
+    let mut rng = rand_core::OsRng;
+    let private_key =
+        RsaPrivateKey::new(&mut rng, 2048).map_err(|e| format!("RSA gen failed: {e}"))?;
+    let public_key = RsaPublicKey::from(&private_key);
+
+    let kid = generate_kid(&public_key);
+
+    let stored = StoredKey {
+        kid: kid.clone(),
+        n: URL_SAFE_NO_PAD.encode(private_key.n().to_bytes_be()),
+        e: URL_SAFE_NO_PAD.encode(private_key.e().to_bytes_be()),
+        d: URL_SAFE_NO_PAD.encode(private_key.d().to_bytes_be()),
+        primes: private_key
+            .primes()
+            .iter()
+            .map(|p| URL_SAFE_NO_PAD.encode(p.to_bytes_be()))
+            .collect(),
+    };
+
+    let stored_bytes = serde_json::to_vec(&stored).map_err(|e| format!("serialize: {e}"))?;
+    let value_b64 = base64::engine::general_purpose::STANDARD.encode(&stored_bytes);
+    let payload = serde_json::json!({ "table": keys_table(), "key": KEY_NAME, "value": value_b64 });
+
+    match ldb_request("ldb.create", &payload).await {
+        Ok(_) => {
+            eprintln!("KEY-MANAGER: generated and stored new signing key kid={kid}");
+            Ok(stored)
+        }
+        Err(e) if e.contains("already exists") => {
+            // Another instance won the race — load the winner's key
+            eprintln!("KEY-MANAGER: key race lost, loading existing key");
+            load_from_db()
+                .await?
+                .ok_or_else(|| "key disappeared after race".to_string())
+        }
+        Err(e) => Err(format!("store key: {e}")),
+    }
+}
+
+async fn load_keys() -> Result<LoadedKeys, String> {
+    let stored = match load_from_db().await? {
+        Some(s) => s,
+        None => generate_and_store().await?,
+    };
+    let ec_stored = match load_ec_from_db().await? {
+        Some(s) => s,
+        None => generate_and_store_ec().await?,
+    };
+    let loaded = stored.to_loaded()?;
+    let ec_loaded = ec_stored.to_loaded_ec()?;
+    Ok(LoadedKeys {
+        kid: loaded.kid,
+        rsa_jwk: loaded.jwk,
+        ec_kid: ec_loaded.kid,
+        ec_jwk: ec_loaded.jwk,
+        signing_key: loaded.signing_key,
+        ec_signing_key: ec_loaded.signing_key,
+    })
+}
+
+struct RsaLoaded {
     kid: String,
-    created_at: u64,
+    jwk: String,
+    signing_key: SigningKey<Sha256>,
+}
+struct EcLoaded {
+    kid: String,
+    jwk: String,
+    signing_key: EcSigningKey,
+}
+
+impl Guest for KeyManager {
+    async fn get_public_key() -> Result<String, String> {
+        let keys = load_keys().await?;
+        Ok(keys.rsa_jwk)
+    }
+
+    async fn get_public_keys() -> Result<String, String> {
+        let keys = load_keys().await?;
+        let arr = serde_json::json!([
+            serde_json::from_str::<serde_json::Value>(&keys.rsa_jwk)
+                .map_err(|e| format!("parse rsa jwk: {e}"))?,
+            serde_json::from_str::<serde_json::Value>(&keys.ec_jwk)
+                .map_err(|e| format!("parse ec jwk: {e}"))?
+        ]);
+        Ok(arr.to_string())
+    }
+
+    async fn get_kid() -> Result<String, String> {
+        let keys = load_keys().await?;
+        Ok(keys.kid)
+    }
+
+    async fn sign_jwt(header: String, payload: String) -> Result<String, String> {
+        let keys = load_keys().await?;
+        // Decode the header to determine the algorithm
+        let header_bytes = URL_SAFE_NO_PAD
+            .decode(&header)
+            .map_err(|e| format!("decode header: {e}"))?;
+        let header_json: serde_json::Value =
+            serde_json::from_slice(&header_bytes).map_err(|e| format!("parse header: {e}"))?;
+        let alg = header_json
+            .get("alg")
+            .and_then(|v| v.as_str())
+            .unwrap_or("RS256");
+
+        let message = format!("{}.{}", header, payload);
+        match alg {
+            "RS256" => {
+                let sig = keys.signing_key.sign(message.as_bytes());
+                Ok(URL_SAFE_NO_PAD.encode(sig.to_bytes()))
+            }
+            "ES256" => {
+                use p256::ecdsa::signature::Signer as _;
+                let sig: p256::ecdsa::Signature = keys.ec_signing_key.sign(message.as_bytes());
+                // RFC 7518 §3.4: ES256 signature is R || S (each 32 bytes) in big-endian
+                let sig_bytes = sig.to_bytes();
+                Ok(URL_SAFE_NO_PAD.encode(sig_bytes))
+            }
+            _ => Err(format!("unsupported algorithm: {alg}")),
+        }
+    }
+}
+
+// ── Persistence types ──────────────────────────────────────
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredKey {
+    kid: String,
     n: String,
     e: String,
     d: String,
     primes: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-struct ExportedRetiredKey {
-    kid: String,
-    retired_at: u64,
-    jwk: serde_json::Value,
-}
+impl StoredKey {
+    fn to_loaded(&self) -> Result<RsaLoaded, String> {
+        use num_bigint_dig::BigUint;
+        let n = decode_biguint(&self.n, "n")?;
+        let e = decode_biguint(&self.e, "e")?;
+        let d = decode_biguint(&self.d, "d")?;
+        let primes: Vec<BigUint> = self
+            .primes
+            .iter()
+            .enumerate()
+            .map(|(i, p)| decode_biguint(p, &format!("prime[{i}]")))
+            .collect::<Result<Vec<_>, _>>()?;
 
-struct KeyStore {
-    current: SigningKeyPair,
-    previous: Vec<RetiredKey>,
-}
+        let private_key = RsaPrivateKey::from_components(n.clone(), e.clone(), d, primes)
+            .map_err(|e| format!("reconstruct key: {e}"))?;
+        let public_key = RsaPublicKey::from(&private_key);
 
-struct SigningKeyPair {
-    kid: String,
-    private_key: RsaPrivateKey,
-    signing_key: SigningKey<Sha256>,
-    jwk: String,
-    created_at: u64,
-}
+        let jwk = build_jwk_string(&public_key, &self.kid);
 
-struct RetiredKey {
-    kid: String,
-    jwk: serde_json::Value,
-    retired_at: u64,
-}
-
-impl Guest for KeyManager {
-    fn get_public_key() -> Result<String, String> {
-        let ks = ensure_keys()?;
-        Ok(ks.current.jwk.clone())
-    }
-
-    fn get_kid() -> Result<String, String> {
-        let ks = ensure_keys()?;
-        Ok(ks.current.kid.clone())
-    }
-
-    fn sign_jwt(header: String, payload: String) -> Result<String, String> {
-        let ks = ensure_keys()?;
-        
-        let message = format!("{}.{}", header, payload);
-        let signature = ks.current.signing_key.sign(message.as_bytes());
-        Ok(URL_SAFE_NO_PAD.encode(signature.to_bytes()))
-    }
-}
-
-fn ensure_keys() -> Result<KeyStore, String> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .as_secs();
-
-    let bucket = kv::open("lid-keys")
-        .map_err(|e| format!("failed to open bucket: {e:?}"))?;
-
-    // 1. Try to load from KV first
-    let (exported, revision) = match bucket.get(KEY_KV_PATH).map_err(|e| format!("{e:?}"))? {
-        Some(entry) => {
-            let exported: ExportedKeyStore = serde_json::from_slice(&entry.value)
-                .map_err(|e| format!("parse failed: {e}"))?;
-            (exported, Some(entry.revision))
-        }
-        None => {
-            // Generate fresh if not in KV
-            let ks = generate_new_keystore(now)?;
-            let exported = export_keystore(&ks)?;
-            let data = serde_json::to_vec(&exported).map_err(|e| e.to_string())?;
-            // Initial persist
-            bucket.create(KEY_KV_PATH, &data).map_err(|e| format!("{e:?}"))?;
-            return Ok(ks);
-        }
-    };
-
-    // 2. Check for rotation if it's time
-    if now - exported.current.created_at >= ROTATION_INTERVAL {
-        if let Some(rev) = revision {
-            let mut ks = import_keystore(exported.clone())?;
-            rotate_keystore(&mut ks, now)?;
-            let new_exported = export_keystore(&ks)?;
-            let new_data = serde_json::to_vec(&new_exported).map_err(|e| e.to_string())?;
-            
-            match bucket.swap(KEY_KV_PATH, &new_data, rev) {
-                Ok(_new_rev) => {
-                    return Ok(ks);
-                }
-                Err(kv::Error::RevisionMismatch) => {
-                    // Lost race, fall through to return current
-                }
-                Err(e) => return Err(format!("swap failed: {e:?}")),
-            }
-        }
-    }
-
-    // 3. Return imported keystore
-    import_keystore(exported)
-}
-
-fn generate_new_keystore(now: u64) -> Result<KeyStore, String> {
-    let mut rng = rand_core::OsRng;
-    let private_key = RsaPrivateKey::new(&mut rng, 2048)
-        .map_err(|e| format!("RSA gen failed: {}", e))?;
-    let public_key = RsaPublicKey::from(&private_key);
-    
-    let kid = generate_kid(&public_key);
-    let jwk = build_jwk_string(&public_key, &kid);
-    
-    Ok(KeyStore {
-        current: SigningKeyPair {
-            kid,
+        Ok(RsaLoaded {
+            kid: self.kid.clone(),
             jwk,
-            signing_key: SigningKey::<Sha256>::new(private_key.clone()),
-            private_key,
-            created_at: now,
-        },
-        previous: Vec::new(),
-    })
+            signing_key: SigningKey::<Sha256>::new(private_key),
+        })
+    }
+}
+
+fn decode_biguint(b64: &str, label: &str) -> Result<num_bigint_dig::BigUint, String> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(b64)
+        .map_err(|e| format!("decode {label}: {e}"))?;
+    Ok(num_bigint_dig::BigUint::from_bytes_be(&bytes))
 }
 
 fn generate_kid(pub_key: &RsaPublicKey) -> String {
@@ -174,86 +292,107 @@ fn build_jwk_string(pub_key: &RsaPublicKey, kid: &str) -> String {
         "kid": kid,
         "n": n,
         "e": e,
-    }).to_string()
-}
-
-fn rotate_keystore(ks: &mut KeyStore, now: u64) -> Result<(), String> {
-    let mut rng = rand_core::OsRng;
-    let new_private = RsaPrivateKey::new(&mut rng, 2048)
-        .map_err(|e| format!("RSA gen failed: {}", e))?;
-    let new_public = RsaPublicKey::from(&new_private);
-    let new_kid = generate_kid(&new_public);
-    let new_jwk = build_jwk_string(&new_public, &new_kid);
-
-    let old = std::mem::replace(&mut ks.current, SigningKeyPair {
-        kid: new_kid,
-        jwk: new_jwk,
-        signing_key: SigningKey::<Sha256>::new(new_private.clone()),
-        private_key: new_private,
-        created_at: now,
-    });
-
-    ks.previous.push(RetiredKey {
-        kid: old.kid,
-        jwk: serde_json::from_str(&old.jwk).unwrap(),
-        retired_at: now,
-    });
-
-    Ok(())
-}
-
-fn export_keystore(ks: &KeyStore) -> Result<ExportedKeyStore, String> {
-    let n = URL_SAFE_NO_PAD.encode(ks.current.private_key.n().to_bytes_be());
-    let e = URL_SAFE_NO_PAD.encode(ks.current.private_key.e().to_bytes_be());
-    let d = URL_SAFE_NO_PAD.encode(ks.current.private_key.d().to_bytes_be());
-    let primes = ks.current.private_key.primes().iter()
-        .map(|p| URL_SAFE_NO_PAD.encode(p.to_bytes_be()))
-        .collect();
-
-    Ok(ExportedKeyStore {
-        current: ExportedSigningKey {
-            kid: ks.current.kid.clone(),
-            created_at: ks.current.created_at,
-            n, e, d, primes,
-        },
-        previous: ks.previous.iter().map(|rk| ExportedRetiredKey {
-            kid: rk.kid.clone(),
-            retired_at: rk.retired_at,
-            jwk: rk.jwk.clone(),
-        }).collect(),
     })
+    .to_string()
 }
 
-fn import_keystore(exported: ExportedKeyStore) -> Result<KeyStore, String> {
-    use num_bigint_dig::BigUint;
+// ── EC (P-256 / ES256) key storage ───────────────────────────
 
-    let n = BigUint::from_bytes_be(&URL_SAFE_NO_PAD.decode(&exported.current.n).map_err(|e| e.to_string())?);
-    let e = BigUint::from_bytes_be(&URL_SAFE_NO_PAD.decode(&exported.current.e).map_err(|e| e.to_string())?);
-    let d = BigUint::from_bytes_be(&URL_SAFE_NO_PAD.decode(&exported.current.d).map_err(|e| e.to_string())?);
-    let mut primes = Vec::new();
-    for p_str in exported.current.primes {
-        primes.push(BigUint::from_bytes_be(&URL_SAFE_NO_PAD.decode(&p_str).map_err(|e| e.to_string())?));
-    }
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredEcKey {
+    kid: String,
+    /// Raw 32-byte P-256 scalar, base64url-encoded.
+    d: String,
+}
 
-    let private_key = RsaPrivateKey::from_components(n, e, d, primes)
-        .map_err(|e| format!("RSA import failed: {}", e))?;
-    let public_key = RsaPublicKey::from(&private_key);
-    let jwk = build_jwk_string(&public_key, &exported.current.kid);
-
-    Ok(KeyStore {
-        current: SigningKeyPair {
-            kid: exported.current.kid,
+impl StoredEcKey {
+    fn to_loaded_ec(&self) -> Result<EcLoaded, String> {
+        let scalar_bytes = URL_SAFE_NO_PAD
+            .decode(&self.d)
+            .map_err(|e| format!("decode EC key: {e}"))?;
+        let sk = EcSigningKey::from_bytes(scalar_bytes.as_slice().into())
+            .map_err(|e| format!("parse EC key: {e}"))?;
+        let vk = sk.verifying_key();
+        let point = vk.to_encoded_point(false); // uncompressed
+        let coords = point.coordinates();
+        let (x_bytes, y_bytes) = match coords {
+            p256::elliptic_curve::sec1::Coordinates::Uncompressed { x, y } => (x, y),
+            _ => return Err("expected uncompressed EC point".into()),
+        };
+        let jwk = serde_json::json!({
+            "kty": "EC",
+            "use": "sig",
+            "alg": "ES256",
+            "kid": self.kid,
+            "crv": "P-256",
+            "x": URL_SAFE_NO_PAD.encode(x_bytes),
+            "y": URL_SAFE_NO_PAD.encode(y_bytes),
+        })
+        .to_string();
+        Ok(EcLoaded {
+            kid: self.kid.clone(),
             jwk,
-            signing_key: SigningKey::<Sha256>::new(private_key.clone()),
-            private_key,
-            created_at: exported.current.created_at,
-        },
-        previous: exported.previous.iter().map(|rk| RetiredKey {
-            kid: rk.kid.clone(),
-            jwk: rk.jwk.clone(),
-            retired_at: rk.retired_at,
-        }).collect(),
-    })
+            signing_key: sk,
+        })
+    }
+}
+
+async fn load_ec_from_db() -> Result<Option<StoredEcKey>, String> {
+    let payload = serde_json::json!({ "table": keys_table(), "key": EC_KEY_NAME });
+    match ldb_request("ldb.get", &payload).await {
+        Ok(resp) => {
+            let value_b64 = resp
+                .get("value")
+                .and_then(|v| v.as_str())
+                .ok_or("missing value")?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(value_b64)
+                .map_err(|e| format!("base64 decode: {e}"))?;
+            let stored: StoredEcKey =
+                serde_json::from_slice(&bytes).map_err(|e| format!("deserialize EC key: {e}"))?;
+            Ok(Some(stored))
+        }
+        Err(e) if e.contains("not found") => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+async fn generate_and_store_ec() -> Result<StoredEcKey, String> {
+    let sk = EcSigningKey::random(&mut rand_core::OsRng);
+    let scalar_bytes: Vec<u8> = sk.to_bytes().to_vec();
+
+    // Compute kid from the public key
+    let vk = sk.verifying_key();
+    let point = vk.to_encoded_point(false);
+    let kid = {
+        use sha2::Digest;
+        let hash = Sha256::digest(point.as_bytes());
+        URL_SAFE_NO_PAD.encode(&hash[..12])
+    };
+
+    let stored = StoredEcKey {
+        kid: kid.clone(),
+        d: URL_SAFE_NO_PAD.encode(&scalar_bytes),
+    };
+
+    let stored_bytes = serde_json::to_vec(&stored).map_err(|e| format!("serialize EC key: {e}"))?;
+    let value_b64 = base64::engine::general_purpose::STANDARD.encode(&stored_bytes);
+    let payload =
+        serde_json::json!({ "table": keys_table(), "key": EC_KEY_NAME, "value": value_b64 });
+
+    match ldb_request("ldb.create", &payload).await {
+        Ok(_) => {
+            eprintln!("KEY-MANAGER: generated and stored new EC signing key kid={kid}");
+            Ok(stored)
+        }
+        Err(e) if e.contains("already exists") => {
+            eprintln!("KEY-MANAGER: EC key race lost, loading existing key");
+            load_ec_from_db()
+                .await?
+                .ok_or_else(|| "EC key disappeared after race".to_string())
+        }
+        Err(e) => Err(format!("store EC key: {e}")),
+    }
 }
 
 bindings::export!(KeyManager with_types_in bindings);

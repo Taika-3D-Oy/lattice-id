@@ -20,6 +20,7 @@ web-sys = { version = "0.3", features = [
     "Window", "Storage", "Document", "Element",
     "Crypto", "History", "Location", "Headers",
     "Request", "RequestInit", "RequestMode", "Response",
+    "Navigator", "Clipboard",
 ] }
 js-sys = "0.3"
 log = "0.4"

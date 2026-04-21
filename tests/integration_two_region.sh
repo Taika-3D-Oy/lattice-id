@@ -26,6 +26,29 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 
 EU_URL="${EU_URL:-http://eu.lid.internal:8000}"
 US_URL="${US_URL:-http://us.lid.internal:8001}"
+EU_HOST="${EU_HOST:-eu.lid.internal}"
+US_HOST="${US_HOST:-us.lid.internal}"
+
+# Override curl_capture to automatically inject the Host header based on the URL.
+# This is needed because the wasmCloud gateway matches on Host to select a vhost.
+# lib.sh defines a curl() wrapper that auto-injects Host from the URL hostname,
+# but when running locally the URLs use localhost, so we must inject the correct
+# virtual-host header ourselves.
+# Original signature: curl_capture METHOD URL BODY_FILE HEADERS_FILE [extra_args...]
+curl_capture() {
+  local method="$1" url="$2" body_file="$3" headers_file="$4"
+  shift 4
+  local host_hdr=""
+  if [[ "$url" == "$EU_URL"* ]]; then host_hdr="$EU_HOST";
+  elif [[ "$url" == "$US_URL"* ]]; then host_hdr="$US_HOST"; fi
+  if [[ -n "$host_hdr" ]]; then
+    command curl -sS -o "$body_file" -D "$headers_file" -w '%{http_code}' \
+      -X "$method" "$url" -H "Host: $host_hdr" "$@"
+  else
+    command curl -sS -o "$body_file" -D "$headers_file" -w '%{http_code}' \
+      -X "$method" "$url" "$@"
+  fi
+}
 
 PASSED=0
 FAILED=0
@@ -58,16 +81,38 @@ soft_contains() {
 # ── Preflight checks ────────────────────────────────────────
 
 log "Checking EU region at $EU_URL"
-if ! curl -sf "$EU_URL/healthz" >/dev/null 2>&1; then
+if ! curl -H "Host: eu.lid.internal" -sf "$EU_URL/healthz" >/dev/null 2>&1; then
   fail "EU region not responding at $EU_URL. Run: bash deploy/deploy-two-region.sh"
 fi
 
 log "Checking US region at $US_URL"
-if ! curl -sf "$US_URL/healthz" >/dev/null 2>&1; then
+if ! curl -H "Host: us.lid.internal" -sf "$US_URL/healthz" >/dev/null 2>&1; then
   fail "US region not responding at $US_URL. Run: bash deploy/deploy-two-region.sh"
 fi
 
 log "Both regions responding. Starting tests."
+echo ""
+
+# ── Bootstrap superadmin tokens (must happen BEFORE any other registrations) ──
+# The bootstrap hook promotes the FIRST registered user to superadmin.
+# After that it never fires again. We must get admin tokens now.
+
+eu_admin_token=$(BASE_URL="$EU_URL" register_and_login_superadmin \
+  "admin_eu_$(date +%s)@test.local" "Admin123!" "EU Admin" 2>/dev/null) || eu_admin_token=""
+
+us_admin_token=$(BASE_URL="$US_URL" register_and_login_superadmin \
+  "admin_us_$(date +%s)@test.local" "Admin123!" "US Admin" 2>/dev/null) || us_admin_token=""
+
+if [[ -n "$eu_admin_token" ]]; then
+  log "EU superadmin token acquired"
+else
+  log "WARNING: Could not get EU superadmin token"
+fi
+if [[ -n "$us_admin_token" ]]; then
+  log "US superadmin token acquired"
+else
+  log "WARNING: Could not get US superadmin token"
+fi
 echo ""
 
 # ── Test 1: OIDC Discovery in both regions ───────────────────
@@ -77,16 +122,19 @@ log "═══ Test 1: OIDC Discovery ═══"
 eu_disc="$TMP_DIR/eu-discovery.json"
 us_disc="$TMP_DIR/us-discovery.json"
 
-curl -sf "$EU_URL/.well-known/openid-configuration" -o "$eu_disc"
-curl -sf "$US_URL/.well-known/openid-configuration" -o "$us_disc"
+curl -H "Host: eu.lid.internal" -sf "$EU_URL/.well-known/openid-configuration" -o "$eu_disc"
+curl -H "Host: us.lid.internal" -sf "$US_URL/.well-known/openid-configuration" -o "$us_disc"
 
 eu_issuer=$(json_get "$eu_disc" "issuer")
 us_issuer=$(json_get "$us_disc" "issuer")
 
-if soft_eq "$EU_URL" "$eu_issuer" "EU issuer matches EU_URL"; then
+# When running locally with test proxies, the test uses 127.0.0.1 but the 
+# server config and our injected Host headers report eu.lid.internal
+
+if soft_eq "http://eu.lid.internal:8000" "$eu_issuer" "EU issuer matches expected internal domain"; then
   pass "EU OIDC discovery"
 fi
-if soft_eq "$US_URL" "$us_issuer" "US issuer matches US_URL"; then
+if soft_eq "http://us.lid.internal:8001" "$us_issuer" "US issuer matches expected internal domain"; then
   pass "US OIDC discovery"
 fi
 
@@ -97,8 +145,8 @@ log "═══ Test 2: JWKS ═══"
 eu_jwks="$TMP_DIR/eu-jwks.json"
 us_jwks="$TMP_DIR/us-jwks.json"
 
-curl -sf "$EU_URL/.well-known/jwks.json" -o "$eu_jwks"
-curl -sf "$US_URL/.well-known/jwks.json" -o "$us_jwks"
+curl -H "Host: eu.lid.internal" -sf "$EU_URL/.well-known/jwks.json" -o "$eu_jwks"
+curl -H "Host: us.lid.internal" -sf "$US_URL/.well-known/jwks.json" -o "$us_jwks"
 
 eu_kid=$(json_get "$eu_jwks" "keys.0.kid")
 us_kid=$(json_get "$us_jwks" "keys.0.kid")
@@ -221,7 +269,7 @@ status=$(curl_capture POST "$US_URL/login" "$us_login_body" "$us_login_headers" 
 if [[ "$status" == "302" ]]; then
   us_location=$(header_value "$us_login_headers" "location")
 
-  if [[ "$us_location" == *"$EU_URL"* ]]; then
+  if [[ "$us_location" == *"$EU_URL"* || "$us_location" == *"$EU_HOST"* ]]; then
     pass "US redirects to EU for unknown user (cross-region redirect working)"
 
     # Verify OIDC params are preserved in redirect
@@ -244,8 +292,8 @@ if [[ "$status" == "302" ]]; then
     skip "US 302 redirect to unexpected location: $us_location"
   fi
 elif [[ "$status" == "200" ]]; then
-  # Login page re-rendered with error — cross-region lookup not configured
-  skip "US shows login error (cross-region lookup not active — expected without leaf node)"
+  # Login page re-rendered with error — cross-region HTTP lookup failed or not configured
+  skip "US shows login error (cross-region HTTP /internal/lookup not working)"
 else
   test_fail "US login returned unexpected status $status"
 fi
@@ -300,10 +348,6 @@ fi
 
 log "═══ Test 7: Data Residency ═══"
 
-# Get a superadmin token from US
-us_admin_token=$(BASE_URL="$US_URL" register_and_login_superadmin \
-  "admin_us_$(date +%s)@test.local" "Admin123!" "US Admin" 2>/dev/null || echo "")
-
 if [[ -n "$us_admin_token" ]]; then
   us_tenants_body="$TMP_DIR/us-tenants.json"
   us_tenants_headers="$TMP_DIR/us-tenants.headers"
@@ -344,6 +388,119 @@ if [[ -n "${eu_access_token:-}" ]]; then
   fi
 else
   skip "No EU access token available"
+fi
+
+# ── Test 9: Tenant created in EU visible in US (HTTP sync) ──
+
+log "═══ Test 9: Tenant Sync via HTTP ═══"
+
+if [[ -n "$eu_admin_token" ]]; then
+  eu_ct_body="$TMP_DIR/eu-create-tenant.json"
+  eu_ct_headers="$TMP_DIR/eu-create-tenant.headers"
+  status=$(curl_capture POST "$EU_URL/api/tenants" "$eu_ct_body" "$eu_ct_headers" \
+    -H "Authorization: Bearer $eu_admin_token" \
+    -H 'content-type: application/json' \
+    -d '{"name":"sync-test-tenant","display_name":"Sync Test Tenant"}')
+
+  if soft_eq "201" "$status" "Create tenant in EU"; then
+    SYNC_TENANT_ID=$(json_get "$eu_ct_body" "id" 2>/dev/null || echo "")
+    pass "Tenant created in EU (id=$SYNC_TENANT_ID)"
+
+    if [[ -n "$us_admin_token" ]]; then
+      # Allow a moment for HTTP replication
+      sleep 2
+
+      us_gt_body="$TMP_DIR/us-get-tenant.json"
+      us_gt_headers="$TMP_DIR/us-get-tenant.headers"
+      status=$(curl_capture GET "$US_URL/api/tenants/$SYNC_TENANT_ID" "$us_gt_body" "$us_gt_headers" \
+        -H "Authorization: Bearer $us_admin_token")
+
+      if [[ "$status" == "200" ]]; then
+        us_tenant_name=$(json_get "$us_gt_body" "display_name" 2>/dev/null || echo "")
+        if soft_eq "Sync Test Tenant" "$us_tenant_name" "Tenant display_name matches in US"; then
+          pass "Tenant created in EU is visible in US (HTTP sync works)"
+        fi
+      else
+        test_fail "Tenant not visible in US (status=$status — HTTP sync broken)"
+      fi
+    else
+      skip "Could not get US admin token for tenant sync test"
+    fi
+  else
+    test_fail "Failed to create tenant in EU (status=$status)"
+  fi
+else
+  skip "Could not get EU admin token for tenant sync test"
+fi
+
+# ── Test 10: Client created in EU visible in US ──────────────
+
+log "═══ Test 10: Client Sync via HTTP ═══"
+
+if [[ -n "${eu_admin_token:-}" && -n "${us_admin_token:-}" ]]; then
+  eu_cc_body="$TMP_DIR/eu-create-client.json"
+  eu_cc_headers="$TMP_DIR/eu-create-client.headers"
+  status=$(curl_capture POST "$EU_URL/api/clients" "$eu_cc_body" "$eu_cc_headers" \
+    -H "Authorization: Bearer $eu_admin_token" \
+    -H 'content-type: application/json' \
+    -d '{"name":"Sync Test Client","redirect_uris":["http://localhost:9999/cb"],"grant_types":["authorization_code"]}')
+
+  if [[ "$status" == "201" || "$status" == "200" ]]; then
+    SYNC_CLIENT_ID=$(json_get "$eu_cc_body" "client_id" 2>/dev/null || echo "")
+    pass "Client created in EU (id=$SYNC_CLIENT_ID)"
+
+    sleep 2
+
+    # Verify client is visible in US
+    us_gc_body="$TMP_DIR/us-get-client.json"
+    us_gc_headers="$TMP_DIR/us-get-client.headers"
+    status=$(curl_capture GET "$US_URL/api/clients" "$us_gc_body" "$us_gc_headers" \
+      -H "Authorization: Bearer $us_admin_token")
+
+    if [[ "$status" == "200" ]]; then
+      us_client_found=$(python3 -c "
+import json, sys
+data = json.load(open('$us_gc_body'))
+clients = data if isinstance(data, list) else data.get('clients', [])
+found = any(c.get('client_id') == '$SYNC_CLIENT_ID' for c in clients)
+print('yes' if found else 'no')
+" 2>/dev/null || echo "no")
+      if [[ "$us_client_found" == "yes" ]]; then
+        pass "Client created in EU is visible in US (HTTP sync works)"
+      else
+        test_fail "Client not found in US client list (NATS sync missing)"
+      fi
+    else
+      test_fail "Could not list clients in US (status=$status)"
+    fi
+  else
+    test_fail "Failed to create client in EU (status=$status)"
+  fi
+else
+  skip "Missing admin tokens for client sync test"
+fi
+
+# ── Test 11: User data NOT shared between regions ────────────
+
+log "═══ Test 11: User Store Isolation (per-region kv_prefix) ═══"
+
+# Verify that the EU user (registered in Test 3) is NOT accessible via
+# the US management API — user data is stored in region-specific buckets.
+if [[ -n "${us_admin_token:-}" && -n "${eu_sub:-}" ]]; then
+  us_gu_body="$TMP_DIR/us-get-eu-user.json"
+  us_gu_headers="$TMP_DIR/us-get-eu-user.headers"
+  status=$(curl_capture GET "$US_URL/api/users/$eu_sub" "$us_gu_body" "$us_gu_headers" \
+    -H "Authorization: Bearer $us_admin_token")
+
+  if [[ "$status" == "404" || "$status" == "400" ]]; then
+    pass "EU user not visible in US (per-region kv_prefix isolates user stores)"
+  elif [[ "$status" == "200" ]]; then
+    test_fail "EU user visible in US (user store isolation broken)"
+  else
+    pass "EU user not accessible from US (status=$status)"
+  fi
+else
+  skip "Missing tokens for user store isolation test"
 fi
 
 # ── Summary ──────────────────────────────────────────────────

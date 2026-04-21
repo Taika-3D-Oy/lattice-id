@@ -1,0 +1,116 @@
+name: Publish
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag (e.g. v1.0.0 or latest)"
+        required: true
+        default: "latest"
+
+env:
+  CARGO_TERM_COLOR: always
+  REGISTRY: ghcr.io
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Install wasm32-wasip2 target (source libc/CRT)
+        run: rustup target add wasm32-wasip2
+
+      - name: Bootstrap wasm32-wasip3 sysroot (libc/CRT)
+        run: |
+          WASIP2_SC="$(rustc --print sysroot)/lib/rustlib/wasm32-wasip2/lib/self-contained"
+          WASIP3_SC="$(rustc --print sysroot)/lib/rustlib/wasm32-wasip3/lib/self-contained"
+          mkdir -p "$WASIP3_SC"
+          cp "$WASIP2_SC"/* "$WASIP3_SC"/
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "false"
+
+      - name: Install ORAS CLI
+        uses: oras-project/setup-oras@v1
+
+      - name: Determine image tag
+        id: tag
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event_name }}" == "push" ]]; then
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compute image prefix (lowercase)
+        id: prefix
+        run: echo "prefix=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build workspace (wasip3 release)
+        run: cargo build --workspace --target wasm32-wasip3 --release
+
+      - name: Build admin-ui
+        run: |
+          # Install trunk for building the Leptos CSR frontend
+          cargo install trunk --locked
+          rustup target add wasm32-unknown-unknown
+          cd admin-ui && trunk build --release
+          cd host && cargo build --target wasm32-wasip2 --release
+
+      - name: Push components to GHCR
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          IMAGE_PREFIX: ${{ steps.prefix.outputs.prefix }}
+        run: |
+          components=(oidc-gateway password-hasher email-worker abuse-protection key-manager region-authority crypto-vault)
+          for comp in "${components[@]}"; do
+            wasm="${comp//-/_}"
+            echo "==> Pushing ${comp}:${TAG}"
+            oras push "${IMAGE_PREFIX}/${comp}:${TAG}" \
+              "target/wasm32-wasip3/release/${wasm}.wasm:application/wasm"
+          done
+
+          echo "==> Pushing admin-ui-host:${TAG}"
+          oras push "${IMAGE_PREFIX}/admin-ui-host:${TAG}" \
+            "admin-ui/host/target/wasm32-wasip2/release/admin_ui_host.wasm:application/wasm"
+
+          # Also tag as latest
+          if [[ "${TAG}" != "latest" ]]; then
+            for comp in "${components[@]}"; do
+              wasm="${comp//-/_}"
+              oras push "${IMAGE_PREFIX}/${comp}:latest" \
+                "target/wasm32-wasip3/release/${wasm}.wasm:application/wasm"
+            done
+            oras push "${IMAGE_PREFIX}/admin-ui-host:latest" \
+              "admin-ui/host/target/wasm32-wasip2/release/admin_ui_host.wasm:application/wasm"
+          fi
+
+      - name: Summary
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          IMAGE_PREFIX: ${{ steps.prefix.outputs.prefix }}
+        run: |
+          echo "## Published images" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+            for comp in oidc-gateway password-hasher email-worker abuse-protection key-manager region-authority crypto-vault admin-ui-host; do
+            echo "- \`${IMAGE_PREFIX}/${comp}:${TAG}\`" >> "$GITHUB_STEP_SUMMARY"
+          done

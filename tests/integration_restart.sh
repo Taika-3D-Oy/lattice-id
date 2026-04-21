@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
-# Test: Authority restart recovery and signing key continuity (3.9)
-# Focus: Ensure persisted keys and sessions survive a core-service restart
+# Test: Authority restart recovery and signing key continuity
+# Focus: Ensure persisted keys and sessions survive a lattice-id workload restart
+#
+# This test verifies that:
+#   1. Tokens issued before restart are valid after restart
+#   2. JWKS keys survive restart (same kid)
+#   3. Refresh tokens work across restarts
+#   4. Management API remains accessible
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -56,30 +62,63 @@ exchange_code() {
     --data-urlencode "client_id=$client_id"
 }
 
+# Restart the lattice-id workload without wiping NATS (preserves data).
+restart_lattice_id() {
+  log "Restarting lattice-id workload..."
+  local wd_name
+  wd_name=$(kubectl ${KUBE_CTX_FLAG:-} get workloaddeployment ${KUBE_NS_FLAG:-} -o name 2>/dev/null \
+    | grep "lattice-id" | head -1)
+  if [[ -z "$wd_name" ]]; then
+    fail "Cannot find lattice-id workload deployment"
+  fi
+  wd_name="${wd_name#workloaddeployment.runtime.wasmcloud.dev/}"
+
+  # Save the manifest, delete, and re-apply
+  kubectl ${KUBE_CTX_FLAG:-} get workloaddeployment "$wd_name" ${KUBE_NS_FLAG:-} -o yaml > "$TMP_DIR/lattice-id-wd.yaml"
+  kubectl ${KUBE_CTX_FLAG:-} delete workloaddeployment "$wd_name" ${KUBE_NS_FLAG:-} --wait=true >/dev/null 2>&1
+  sleep 5
+  kubectl ${KUBE_CTX_FLAG:-} apply -f "$TMP_DIR/lattice-id-wd.yaml" >/dev/null 2>&1
+  log "Workload re-applied, waiting for readiness..."
+
+  # Wait for OIDC to come back up
+  local attempts=0
+  while true; do
+    if curl -sf "$BASE_URL/.well-known/jwks.json" >/dev/null 2>&1; then
+      break
+    fi
+    attempts=$((attempts + 1))
+    if [[ $attempts -ge 120 ]]; then
+      fail "Timed out waiting for cluster readiness after restart"
+    fi
+    sleep 1
+  done
+  log "Cluster ready after restart"
+}
+
 main() {
   log "Starting restart recovery test..."
-  
-  # Step 1: Start system
-  start_wash_dev
-  
-  # Step 2: Register the admin (bootstrap hook promotes to superadmin)
+
+  wait_for_cluster
+
+  # Step 1: Register the admin (bootstrap hook promotes to superadmin)
   log "Registering admin (bootstrap hook will promote)..."
-  local admin_email="restart.admin@example.com"
+  local admin_email
+  admin_email="restart.$(date +%s)@example.com"
   local secret="test-admin-password-$(random_string)"
   local admin_token
   admin_token=$(register_and_login_superadmin "$admin_email" "$secret" "Admin User")
   assert_ne "" "$admin_token" "admin access token"
 
-  # Step 3: Issue a real OIDC token before restart
+  # Step 2: Issue a real OIDC token before restart
   log "Issuing pre-restart access token..."
-  local verifier challenge session_id code token_body token_headers access_token refresh_token kid
+  local verifier challenge session_id code token_body token_headers status access_token refresh_token kid
   verifier=$(random_string)
   challenge=$(pkce_challenge "$verifier")
-  session_id=$(authorize_session 'lid-admin' 'http://localhost:8000/callback' "$challenge")
+  session_id=$(authorize_session 'lid-admin' 'http://localhost:8090/callback' "$challenge")
   code=$(login_for_code "$session_id" "$admin_email" "$secret")
   token_body="$TMP_DIR/restart-token.json"
   token_headers="$TMP_DIR/restart-token.headers"
-  status=$(exchange_code "$code" "$verifier" 'http://localhost:8000/callback' 'lid-admin' "$token_body" "$token_headers")
+  status=$(exchange_code "$code" "$verifier" 'http://localhost:8090/callback' 'lid-admin' "$token_body" "$token_headers")
   assert_eq 200 "$status" "pre-restart token exchange"
   access_token=$(json_get "$token_body" access_token)
   refresh_token=$(json_get "$token_body" refresh_token)
@@ -98,28 +137,18 @@ main() {
     -H "Authorization: Bearer $access_token")
   assert_eq 200 "$status" "pre-restart userinfo"
   assert_eq "$admin_email" "$(json_get "$userinfo_before_body" email)" "pre-restart userinfo email"
-  
-  # Step 4: Verify the admin token has management access (proves superadmin)
+
+  # Step 3: Verify the admin token has management access (proves superadmin)
   local tenants_body="$TMP_DIR/tenants-before.json"
   local tenants_headers="$TMP_DIR/tenants-before.headers"
   status=$(curl_capture GET "$BASE_URL/api/tenants" "$tenants_body" "$tenants_headers" \
     -H "Authorization: Bearer $admin_token")
   assert_eq 200 "$status" "management access before restart"
-  
-  # Step 5: KILL THE WORLD
-  log "Simulating infrastructure crash / restart (killing wash)..."
-  if [[ -n "$WASH_PID" ]]; then
-    kill "$WASH_PID"
-    wait "$WASH_PID" 2>/dev/null || true
-  fi
-  # Note: NATS data in dev-data/keyvalue remains on disk
-  WASH_PID=""
-  
-  # Step 6: Restart systems WITHOUT wiping dev-data
-  log "Restarting wash-dev (pointing at same persistent storage)..."
-  restart_wash_dev
-  
-  # Step 7: Verify Persistence and key continuity
+
+  # Step 4: Restart lattice-id workload (NATS + lattice-db data is preserved)
+  restart_lattice_id
+
+  # Step 5: Verify persistence and key continuity
   log "Verifying state after restart..."
   local tenants_after_body="$TMP_DIR/tenants-after.json"
   local tenants_after_headers="$TMP_DIR/tenants-after.headers"
@@ -151,7 +180,7 @@ main() {
   local new_access_token
   new_access_token=$(json_get "$refresh_after_body" access_token)
   assert_ne "" "$new_access_token" "post-restart refreshed access token"
-  
+
   log "SUCCESS: Authority preserved bootstrap state, signing keys, and token validity across restart."
 }
 

@@ -2,24 +2,27 @@
 # deploy-two-region.sh — Production-like two-region deployment using separate
 # Kind clusters to eliminate operator CRD contention.
 #
-# Each region gets its own Kind cluster with a dedicated NATS, runtime-operator,
-# and wasmCloud host.  Cross-region user lookup is done via HTTP: each region's
-# oidc-gateway calls the remote region's /internal/lookup endpoint.
+# Each region gets its own Kind cluster with:
+#   - wasmCloud runtime-operator (Helm chart — control plane NATS with mTLS)
+#   - nats-data pod (region-local JetStream KV storage)
+#   - lattice-db workload (connects to nats-data)
+#   - lattice-id workload (oidc-gateway + satellites, messaging via nats-data)
+#
+# Regions are fully independent — no NATS federation, leaf nodes, or shared
+# JetStream. All cross-region communication uses HTTP:
+#   - /internal/lookup   — email hash existence check (user routing)
+#   - /internal/replicate — tenant/client metadata sync (fire-and-forget)
 #
 # Architecture:
-#   ┌──────────────────┐              ┌──────────────────┐
-#   │  lattice-id-eu   │              │  lattice-id-us   │
-#   │  ┌────────────┐  │   HTTP GET   │  ┌────────────┐  │
-#   │  │  operator   │  │  /internal/  │  │  operator   │  │
-#   │  │  host       │  │   lookup     │  │  host       │  │
-#   │  │  gateway    │──┼──────────────┼──│  gateway    │  │
-#   │  │  NATS(mTLS) │  │              │  │  NATS(mTLS) │  │
-#   │  └────────────┘  │              │  └────────────┘  │
-#   │  eu.lid.internal  │              │  us.lid.internal  │
-#   │  :8000            │              │  :8001            │
-#   └──────────────────┘              └──────────────────┘
-#             ▲                                 ▲
-#             └───── shared OCI registry ───────┘
+#   ┌───────────────────────┐    HTTP     ┌───────────────────────┐
+#   │  lattice-id-eu        │  /internal/ │  lattice-id-us        │
+#   │  ┌─────────────────┐  │◄───────────►│  ┌─────────────────┐  │
+#   │  │  wasmcloud host  │  │  lookup +   │  │  wasmcloud host  │  │
+#   │  │  oidc-gateway    │  │  replicate  │  │  oidc-gateway    │  │
+#   │  │  lattice-db      │  │             │  │  lattice-db      │  │
+#   │  │  nats-data       │  │             │  │  nats-data       │  │
+#   │  └─────────────────┘  │             │  └─────────────────┘  │
+#   └───────────────────────┘             └───────────────────────┘
 #
 # Usage:
 #   bash deploy/deploy-two-region.sh          # full setup from scratch
@@ -49,20 +52,20 @@ US_HOST_PORT=8001
 EU_HOSTNAME="eu.lid.internal"
 US_HOSTNAME="us.lid.internal"
 
-BUCKETS="lid-users lid-user-idx lid-sessions lid-clients lid-tenants lid-memberships lid-audit lid-keys lid-abuse-rate-limits"
+# lattice-db image source (override if you want a pinned version)
+LATTICE_DB_IMAGE="${LATTICE_DB_IMAGE:-ghcr.io/taika-3d-oy/lattice-db/storage-service:latest}"
 
 log() { echo "==> $*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
 
-# Compute cross-cluster HTTP URLs using Docker network IPs + gateway NodePort.
-# Each region's oidc-gateway uses HTTP to query remote regions' /internal/lookup.
-# Hostnames (eu.lid.internal / us.lid.internal) are resolved via CoreDNS to
-# Docker-network IPs, so the Host header matches the gateway's virtual-host config.
+# Compute cross-cluster HTTP URLs using Docker network IPs + port 80.
+# Port 80 is the HTTP default, so the Host header omits it — matching the
+# gateway's virtual-host config (hostname only, no port).
 compute_region_urls() {
   EU_NODE_IP=$(docker inspect -f '{{.NetworkSettings.Networks.kind.IPAddress}}' "${EU_CLUSTER}-control-plane")
   US_NODE_IP=$(docker inspect -f '{{.NetworkSettings.Networks.kind.IPAddress}}' "${US_CLUSTER}-control-plane")
-  EU_INTERNAL_URL="http://${EU_HOSTNAME}:${EU_GATEWAY_NODEPORT}"
-  US_INTERNAL_URL="http://${US_HOSTNAME}:${US_GATEWAY_NODEPORT}"
+  EU_INTERNAL_URL="http://${EU_HOSTNAME}"
+  US_INTERNAL_URL="http://${US_HOSTNAME}"
   log "Region URLs: EU=${EU_INTERNAL_URL} (${EU_NODE_IP}) US=${US_INTERNAL_URL} (${US_NODE_IP})"
 }
 
@@ -89,23 +92,150 @@ if [[ "${1:-}" == "teardown" ]]; then
   exit 0
 fi
 
+# ── NATS data-plane pod (per region, local JetStream only) ──
+
+deploy_nats_data() {
+  local ctx="$1" ns="$2"
+  log "Deploying nats-data (local JetStream) in $ns ($ctx)"
+
+  kubectl create configmap nats-data-config \
+    --from-file=nats-data.conf=deploy/nats-data.conf \
+    --context "$ctx" -n "$ns" \
+    --dry-run=client -o yaml | kubectl apply --context "$ctx" -f -
+
+  cat <<'EOF' | kubectl apply --context "$ctx" -n "$ns" -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nats-data
+  labels:
+    app: nats-data
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nats-data
+  template:
+    metadata:
+      labels:
+        app: nats-data
+    spec:
+      containers:
+        - name: nats
+          image: nats:2-alpine
+          args: ["-c", "/etc/nats/nats-data.conf"]
+          ports:
+            - containerPort: 4222
+              name: client
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nats
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: nats-data-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats-data
+  labels:
+    app: nats-data
+spec:
+  type: ClusterIP
+  selector:
+    app: nats-data
+  ports:
+    - port: 4222
+      targetPort: 4222
+      name: client
+EOF
+
+  kubectl rollout status deploy/nats-data -n "$ns" --context "$ctx" --timeout=60s
+}
+
+# ── lattice-db workload (per region) ────────────────────────
+
+deploy_lattice_db() {
+  local ctx="$1" ns="$2"
+
+  local nats_ip
+  nats_ip=$(kubectl get svc nats-data -n "$ns" --context "$ctx" -o jsonpath='{.spec.clusterIP}')
+  log "Deploying lattice-db from ${LATTICE_DB_IMAGE} in $ns ($ctx) — NATS @ ${nats_ip}"
+
+  python3 - "$nats_ip" "$ns" "$LATTICE_DB_IMAGE" <<'PYEOF'
+import sys, json
+
+nats_ip, ns, lattice_db_image = sys.argv[1], sys.argv[2], sys.argv[3]
+
+doc = {
+    "apiVersion": "runtime.wasmcloud.dev/v1alpha1",
+    "kind": "WorkloadDeployment",
+    "metadata": {
+        "name": f"lattice-db-{ns}",
+        "namespace": ns,
+        "annotations": {"description": f"lattice-db storage service ({ns})"}
+    },
+    "spec": {
+        "replicas": 1,
+        "deployPolicy": "RollingUpdate",
+        "template": {
+            "labels": {
+                "app.kubernetes.io/name": "lattice-db",
+                "app.kubernetes.io/component": "storage"
+            },
+            "spec": {
+                "hostSelector": {"hostgroup": ns},
+                "components": [],
+                "service": {
+                  "image": lattice_db_image,
+                    "maxRestarts": 5,
+                    "localResources": {
+                        "environment": {
+                            "config": {
+                                "NATS_URL": nats_ip + ":4222"
+                            }
+                        }
+                    }
+                },
+                "hostInterfaces": [
+                    {
+                        "namespace": "wasi",
+                        "package": "sockets",
+                        "interfaces": ["tcp"]
+                    }
+                ]
+            }
+        }
+    }
+}
+
+with open(f"/tmp/lattice-db-{ns}.json", "w") as f:
+    json.dump(doc, f)
+print(f"Wrote /tmp/lattice-db-{ns}.json")
+PYEOF
+
+  kubectl apply --context "$ctx" -f "/tmp/lattice-db-${ns}.json"
+}
+
 # ── Build & Push ─────────────────────────────────────────────
 
 build_and_push() {
-  log "Building workspace (release, wasm32-wasip2)"
-  cargo build --workspace --target wasm32-wasip2 --release
+  log "Building lattice-id workspace (release, wasm32-wasip3)"
+  cargo build --workspace --target wasm32-wasip3 --release
 
   log "Pushing components to local registry"
-  local components=(core-service oidc-gateway password-hasher email-worker abuse-protection key-manager region-authority)
+  local components=(oidc-gateway password-hasher email-worker abuse-protection key-manager region-authority)
   for comp in "${components[@]}"; do
     local wasm
-    if [[ -f "target/wasm32-wasip2/release/${comp}.wasm" ]]; then
+    if [[ -f "target/wasm32-wasip3/release/${comp}.wasm" ]]; then
       wasm="${comp}"
     else
       wasm="${comp//-/_}"
     fi
     wash oci push --insecure "localhost:${REGISTRY_PORT}/lattice-id/${comp}:dev" \
-      "target/wasm32-wasip2/release/${wasm}.wasm"
+      "target/wasm32-wasip3/release/${wasm}.wasm"
   done
 }
 
@@ -126,6 +256,11 @@ if [[ "${1:-}" == "rebuild" ]]; then
     kubectl delete workloaddeployment -n "$ns" --context "$ctx" --all 2>/dev/null || true
   done
   sleep 2
+
+  # Redeploy lattice-db + lattice-id
+  deploy_lattice_db "$EU_CTX" "$EU_NS"
+  deploy_lattice_db "$US_CTX" "$US_NS"
+  sleep 5
   compute_region_urls
   apply_workload "$EU_CTX" deploy/workloaddeployment-eu.yaml
   apply_workload "$US_CTX" deploy/workloaddeployment-us.yaml
@@ -268,6 +403,33 @@ install_wasmcloud() {
 install_wasmcloud "$EU_CTX" "$EU_NS" "$EU_GATEWAY_NODEPORT"
 install_wasmcloud "$US_CTX" "$US_NS" "$US_GATEWAY_NODEPORT"
 
+# Create a second NodePort service on port 80 for cross-region HTTP traffic.
+# HTTP default port 80 is omitted from the Host header, avoiding the vhost
+# port-mismatch bug in the runtime-gateway.
+create_internal_gateway_svc() {
+  local ctx="$1" ns="$2"
+  log "Creating internal-gateway NodePort=80 in $ns ($ctx)"
+  kubectl apply --context "$ctx" -f - <<EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway-internal
+  namespace: $ns
+spec:
+  type: NodePort
+  selector:
+    wasmcloud.com/name: runtime-gateway
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      nodePort: 80
+EOF
+}
+
+create_internal_gateway_svc "$EU_CTX" "$EU_NS"
+create_internal_gateway_svc "$US_CTX" "$US_NS"
+
 # Wait for base deployments
 log "Waiting for pods in both clusters"
 for ctx_ns in "${EU_CTX}:${EU_NS}" "${US_CTX}:${US_NS}"; do
@@ -277,23 +439,26 @@ for ctx_ns in "${EU_CTX}:${EU_NS}" "${US_CTX}:${US_NS}"; do
     --context "$ctx" -n "$ns" deployment --all 2>/dev/null || true
 done
 
-# 5. Load custom wash image (has taika3d KV plugins)
-log "Loading lattice-id-wash:dev into both clusters"
-kind load docker-image lattice-id-wash:dev --name "$EU_CLUSTER"
-kind load docker-image lattice-id-wash:dev --name "$US_CLUSTER"
-
-# 6. Patch host: custom image + imagePullPolicy + hostgroup + insecure registry
+# 5. Patch host: wash 2.0.2 (wasip3 support), hostgroup, insecure registry
 patch_host() {
   local ctx="$1" ns="$2" region="$3"
-  log "Patching host in $ns ($ctx): image, hostgroup=$region, insecure-registry"
+  log "Patching host in $ns ($ctx): image=wash:2.0.2, hostgroup=$region, insecure-registry, wasip3, data-nats→nats-data"
   kubectl patch deploy hostgroup-default -n "$ns" --context "$ctx" --type=json \
     -p "[
-      {\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/image\",\"value\":\"lattice-id-wash:dev\"},
+      {\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/image\",\"value\":\"localhost:5001/wasmcloud/wash:p3\"},
       {\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/imagePullPolicy\",\"value\":\"Never\"},
       {\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/args/2\",\"value\":\"--host-group=${region}\"},
-      {\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/args/-\",\"value\":\"--allow-insecure-registries\"}
+      {\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/args/7\",\"value\":\"--data-nats-url=nats://nats-data:4222\"},
+      {\"op\":\"remove\",\"path\":\"/spec/template/spec/containers/0/args/10\"},
+      {\"op\":\"remove\",\"path\":\"/spec/template/spec/containers/0/args/9\"},
+      {\"op\":\"remove\",\"path\":\"/spec/template/spec/containers/0/args/8\"},
+      {\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/args/-\",\"value\":\"--allow-insecure-registries\"},
+      {\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/args/-\",\"value\":\"--wasip3\"}
     ]"
 }
+
+kind load docker-image localhost:5001/wasmcloud/wash:p3 --name lattice-id-eu
+kind load docker-image localhost:5001/wasmcloud/wash:p3 --name lattice-id-us
 
 patch_host "$EU_CTX" "$EU_NS" "$EU_NS"
 patch_host "$US_CTX" "$US_NS" "$US_NS"
@@ -307,59 +472,28 @@ for ctx_ns in "${EU_CTX}:${EU_NS}" "${US_CTX}:${US_NS}"; do
 done
 sleep 5
 
-# Cross-region communication uses HTTP (region-authority makes outgoing
-# HTTP requests to remote regions' /internal/lookup endpoint).  No NATS
-# bridge or leaf-node federation is needed.
+# 6. NATS data-plane pods (region-local JetStream, no bridge)
+deploy_nats_data "$EU_CTX" "$EU_NS"
+deploy_nats_data "$US_CTX" "$US_NS"
 
 # ── Workloads ────────────────────────────────────────────────
 
-# 7. Create KV buckets
-create_buckets() {
-  local ctx="$1" ns="$2"
-  log "Creating KV buckets in $ns ($ctx)"
-  python3 - "$ctx" "$ns" "$BUCKETS" <<'PYEOF'
-import subprocess, json, sys
-ctx, ns, buckets_str = sys.argv[1], sys.argv[2], sys.argv[3]
-buckets = buckets_str.split()
-cmds = "; ".join([
-    f"nats --server nats://nats:4222 --tlscert /tls/tls.crt --tlskey /tls/tls.key --tlsca /tls/ca.crt kv add {b} 2>&1 || true"
-    for b in buckets
-])
-overrides = {
-    "spec": {
-        "volumes": [{"name": "tls", "secret": {"secretName": "wasmcloud-data-tls"}}],
-        "containers": [{
-            "name": "nats-setup",
-            "image": "natsio/nats-box:latest",
-            "stdin": True,
-            "tty": False,
-            "volumeMounts": [{"name": "tls", "mountPath": "/tls", "readOnly": True}],
-            "command": ["sh", "-c", cmds]
-        }]
-    }
-}
-subprocess.run([
-    "kubectl", "run", f"nats-setup-{ns}", "--rm", "-i", "--restart=Never",
-    "--context", ctx, "-n", ns,
-    "--image=natsio/nats-box:latest",
-    f"--overrides={json.dumps(overrides)}"
-], timeout=120)
-PYEOF
-}
-
-create_buckets "$EU_CTX" "$EU_NS"
-create_buckets "$US_CTX" "$US_NS"
-
-# 12. Build and push components
+# 7. Build and push components
 build_and_push
 
-# 13. Deploy workloads
-log "Deploying workloads"
+# 8. Deploy lattice-db (needs to start before lattice-id)
+deploy_lattice_db "$EU_CTX" "$EU_NS"
+deploy_lattice_db "$US_CTX" "$US_NS"
+log "Waiting for lattice-db to initialize (10s)"
+sleep 10
+
+# 9. Deploy lattice-id workloads
+log "Deploying lattice-id workloads"
 compute_region_urls
 apply_workload "$EU_CTX" deploy/workloaddeployment-eu.yaml
 apply_workload "$US_CTX" deploy/workloaddeployment-us.yaml
 
-# 14. Health check loop
+# 10. Health check loop
 log "Waiting for workloads to become ready"
 EU_HEALTH="http://${EU_HOSTNAME}:${EU_HOST_PORT}/healthz"
 US_HEALTH="http://${US_HOSTNAME}:${US_HOST_PORT}/healthz"
@@ -389,10 +523,14 @@ fi
 # ── Summary ──────────────────────────────────────────────────
 
 log ""
-log "Two-region environment deployed (separate clusters — no CRD contention)!"
+log "Two-region environment deployed (separate clusters, HTTP-only cross-region)!"
 log ""
 log "  EU: http://${EU_HOSTNAME}:${EU_HOST_PORT}  (cluster: ${EU_CLUSTER})"
 log "  US: http://${US_HOSTNAME}:${US_HOST_PORT}  (cluster: ${US_CLUSTER})"
+log ""
+log "NATS (region-local only, no bridge):"
+log "  EU nats-data: kubectl --context ${EU_CTX} -n ${EU_NS} get pods -l app=nats-data"
+log "  US nats-data: kubectl --context ${US_CTX} -n ${US_NS} get pods -l app=nats-data"
 log ""
 log "Host access (add to /etc/hosts if not already there):"
 log "  127.0.0.1 ${EU_HOSTNAME} ${US_HOSTNAME}"

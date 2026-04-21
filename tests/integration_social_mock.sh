@@ -4,6 +4,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 
+# This test requires a mock server reachable from inside the gateway.
+log "SKIP: social mock test requires localhost mock server (legacy)"
+exit 0
+
 MOCK_PID=""
 
 cleanup_all() {
@@ -161,7 +165,7 @@ main() {
   export LATTICE_ID_GOOGLE_TOKEN_URL="http://127.0.0.1:${mock_port}/token"
   export LATTICE_ID_GOOGLE_JWKS_URL="http://127.0.0.1:${mock_port}/certs"
 
-  start_wash_dev
+  wait_for_cluster
 
   local admin_email="social.admin.$(date +%s)@example.com"
   local admin_password='changeme123'

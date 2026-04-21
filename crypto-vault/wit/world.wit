@@ -1,0 +1,7 @@
+package taika3d:lid;
+
+world crypto-vault {
+    import wasi:config/store@0.2.0-rc.1;
+    import wasmcloud:messaging/consumer@0.2.0;
+    export vault;
+}

@@ -19,9 +19,10 @@ mod tests {
     }
 
     fn mock_claims_with_tenants(role: &str, tenants: Vec<(&str, &str)>) -> serde_json::Value {
-        let tenant_objs: Vec<_> = tenants.iter().map(|(id, r)| {
-            json!({ "tenant_id": id, "role": r })
-        }).collect();
+        let tenant_objs: Vec<_> = tenants
+            .iter()
+            .map(|(id, r)| json!({ "tenant_id": id, "role": r }))
+            .collect();
         json!({
             "sub": "user123",
             "role": role,
@@ -60,7 +61,7 @@ mod tests {
     #[test]
     fn test_claim_has_tenant_role() {
         let manager_t1 = mock_claims("manager", Some("t1"));
-        
+
         // Exact match
         assert!(claim_has_tenant_role(&manager_t1, "t1", "manager"));
         // Lower role required
@@ -69,7 +70,7 @@ mod tests {
         assert!(!claim_has_tenant_role(&manager_t1, "t1", "admin"));
         // Wrong tenant
         assert!(!claim_has_tenant_role(&manager_t1, "t2", "member"));
-        
+
         let superadmin = mock_claims("superadmin", None);
         assert!(claim_has_tenant_role(&superadmin, "any", "owner"));
     }

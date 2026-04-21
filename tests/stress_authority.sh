@@ -5,7 +5,7 @@ source "$SCRIPT_DIR/lib.sh"
 trap cleanup EXIT
 main() {
   log "Starting Stress Test..."
-  start_wash_dev
+  wait_for_cluster
   log "Registering admin..."
   local password="stress-test-pass"
   register_and_login_superadmin "admin@example.com" "$password" "Admin" > /dev/null

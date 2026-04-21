@@ -14,7 +14,7 @@
 //!               set_claim(key, value), log(msg)
 
 use crate::store::{self, Hook, User};
-use rhai::{Dynamic, Engine, Map, Scope, AST};
+use rhai::{AST, Dynamic, Engine, Map, Scope};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -69,8 +69,8 @@ fn user_to_map(user: &User) -> Map {
 }
 
 /// Build the tenants array for script consumption.
-fn tenants_to_array(user_id: &str) -> rhai::Array {
-    let memberships = store::list_user_tenants(user_id).unwrap_or_default();
+async fn tenants_to_array(user_id: &str) -> rhai::Array {
+    let memberships = store::list_user_tenants(user_id).await.unwrap_or_default();
     memberships
         .iter()
         .map(|m| {
@@ -117,12 +117,33 @@ fn create_engine(acc: &HookAccumulator) -> Engine {
     let claims_ref = acc.extra_claims.clone();
     engine.register_fn("set_claim", move |key: &str, value: &str| {
         // Prevent overwriting standard OIDC and identity claims
-        let reserved = ["iss", "sub", "aud", "exp", "iat", "nbf", "nonce",
-                        "auth_time", "token_type", "role", "tenant_id", "tenants",
-                        "email", "name", "email_verified", "amr", "acr",
-                        "scope", "at_hash", "c_hash", "azp"];
+        let reserved = [
+            "iss",
+            "sub",
+            "aud",
+            "exp",
+            "iat",
+            "nbf",
+            "nonce",
+            "auth_time",
+            "token_type",
+            "role",
+            "tenant_id",
+            "tenants",
+            "email",
+            "name",
+            "email_verified",
+            "amr",
+            "acr",
+            "scope",
+            "at_hash",
+            "c_hash",
+            "azp",
+        ];
         if !reserved.contains(&key) {
-            claims_ref.borrow_mut().push((key.to_string(), value.to_string()));
+            claims_ref
+                .borrow_mut()
+                .push((key.to_string(), value.to_string()));
         }
     });
 
@@ -135,8 +156,8 @@ fn create_engine(acc: &HookAccumulator) -> Engine {
 }
 
 /// Execute all enabled hooks for the given trigger, returning the combined outcome.
-pub fn execute_hooks(trigger: &str, user: &User) -> HookOutcome {
-    let hooks = match load_hooks_for_trigger(trigger) {
+pub async fn execute_hooks(trigger: &str, user: &User) -> HookOutcome {
+    let hooks = match load_hooks_for_trigger(trigger).await {
         Ok(h) => h,
         Err(e) => {
             crate::logger::error_message("hooks.load_failed", e);
@@ -152,7 +173,7 @@ pub fn execute_hooks(trigger: &str, user: &User) -> HookOutcome {
     let engine = create_engine(&acc);
 
     let user_map = user_to_map(user);
-    let tenants_arr = tenants_to_array(&user.id);
+    let tenants_arr = tenants_to_array(&user.id).await;
 
     for hook in &hooks {
         // Log execution with content hash for audit traceability
@@ -164,7 +185,8 @@ pub fn execute_hooks(trigger: &str, user: &User) -> HookOutcome {
                 "trigger={} name={} v={} hash={}",
                 trigger, hook.name, hook.version, hook.script_hash
             ),
-        );
+        )
+        .await;
 
         // Compile the script
         let ast: AST = match engine.compile(&hook.script) {
@@ -174,12 +196,9 @@ pub fn execute_hooks(trigger: &str, user: &User) -> HookOutcome {
                     "hooks.compile_failed",
                     format!("hook '{}': {}", hook.name, e),
                 );
-                let _ = store::log_audit(
-                    "hook_error",
-                    &hook.id,
-                    "",
-                    &format!("compile error: {e}"),
-                );
+                let _ =
+                    store::log_audit("hook_error", &hook.id, "", &format!("compile error: {e}"))
+                        .await;
                 continue;
             }
         };
@@ -201,7 +220,8 @@ pub fn execute_hooks(trigger: &str, user: &User) -> HookOutcome {
                 &hook.id,
                 &user.id,
                 &format!("runtime error: {e}"),
-            );
+            )
+            .await;
         }
 
         // If a hook denied, stop processing further hooks
@@ -214,76 +234,101 @@ pub fn execute_hooks(trigger: &str, user: &User) -> HookOutcome {
 }
 
 /// Apply the side-effects from hook execution to the actual user record and memberships.
-pub fn apply_outcome(user: &mut User, outcome: &HookOutcome) -> Result<(), String> {
+pub async fn apply_outcome(user: &mut User, outcome: &HookOutcome) -> Result<(), String> {
     let mut changed = false;
 
     if let Some(sa) = outcome.set_superadmin {
         if user.superadmin != sa {
-            user.superadmin = sa;
             changed = true;
             let _ = store::log_audit(
                 "hook_set_superadmin",
                 "system",
                 &user.id,
                 &format!("superadmin={sa}"),
-            );
+            )
+            .await;
         }
         // Superadmins must be active — skip email verification.
         if sa && user.status != "active" {
-            user.status = "active".to_string();
             changed = true;
         }
     }
 
     if changed {
-        store::update_user(user)?;
+        let set_sa = outcome.set_superadmin;
+        store::update_user_rmw(&user.id, |u| {
+            if let Some(sa) = set_sa {
+                u.superadmin = sa;
+                if sa && u.status != "active" {
+                    u.status = "active".to_string();
+                }
+            }
+            Ok(true)
+        })
+        .await?;
+        // Re-read the updated user so the caller has the latest state
+        if let Some(updated) = store::get_user(&user.id).await? {
+            *user = updated;
+        }
     }
 
     for (tenant_id, role) in &outcome.add_to_tenants {
         // Only add if not already a member
-        let existing = store::list_user_tenants(&user.id).unwrap_or_default();
+        let existing = store::list_user_tenants(&user.id).await.unwrap_or_default();
         if !existing.iter().any(|m| m.tenant_id == *tenant_id) {
             // Verify the tenant exists
-            if store::get_tenant(tenant_id)?.is_some() {
+            if store::get_tenant(tenant_id).await?.is_some() {
                 let membership = store::Membership {
                     tenant_id: tenant_id.clone(),
                     user_id: user.id.clone(),
                     role: role.clone(),
                     joined_at: store::unix_now(),
                 };
-                store::add_membership(&membership)?;
+                store::add_membership(&membership).await?;
                 let _ = store::log_audit(
                     "hook_add_to_tenant",
                     "system",
                     &user.id,
                     &format!("tenant={tenant_id} role={role}"),
-                );
+                )
+                .await;
             }
         }
     }
 
     // Log any script log messages to audit
     for msg in &outcome.log_messages {
-        let _ = store::log_audit("hook_log", "system", &user.id, msg);
+        let _ = store::log_audit("hook_log", "system", &user.id, msg).await;
     }
 
     Ok(())
 }
 
 /// Load hooks for a trigger, sorted by priority (ascending).
-fn load_hooks_for_trigger(trigger: &str) -> Result<Vec<Hook>, String> {
-    let mut hooks = store::list_hooks()?;
+async fn load_hooks_for_trigger(trigger: &str) -> Result<Vec<Hook>, String> {
+    let mut hooks = store::list_hooks().await?;
     hooks.retain(|h| h.enabled && h.trigger == trigger);
     hooks.sort_by_key(|h| h.priority);
     Ok(hooks)
 }
 
 /// Check whether any superadmin user already exists.
-pub fn has_superadmin() -> bool {
-    store::list_users()
+/// Uses a cached flag in KV to avoid scanning all users on every call.
+pub async fn has_superadmin() -> bool {
+    // Fast path: check the cached flag
+    if let Ok(Some(true)) = store::get_superadmin_flag().await {
+        return true;
+    }
+    // Slow path: scan users and update the flag
+    let found = store::list_users()
+        .await
         .unwrap_or_default()
         .iter()
-        .any(|u| u.superadmin)
+        .any(|u| u.superadmin);
+    if found {
+        let _ = store::set_superadmin_flag(true).await;
+    }
+    found
 }
 
 /// Execute the deployment-config bootstrap hook (if present) for a newly
@@ -295,9 +340,9 @@ pub fn has_superadmin() -> bool {
 /// Rhai script (e.g. via `.wash/config.yaml` or env) that promotes a
 /// matching email to superadmin on first registration.  Once a superadmin
 /// exists the hook never fires again.
-pub fn execute_bootstrap_hook(user: &User) -> HookOutcome {
+pub async fn execute_bootstrap_hook(user: &User) -> HookOutcome {
     // Fast-path: once any superadmin exists, skip entirely.
-    if has_superadmin() {
+    if has_superadmin().await {
         return HookOutcome::default();
     }
 
@@ -317,16 +362,13 @@ pub fn execute_bootstrap_hook(user: &User) -> HookOutcome {
     let ast: AST = match engine.compile(&script) {
         Ok(ast) => ast,
         Err(e) => {
-            crate::logger::error_message(
-                "bootstrap_hook.compile_failed",
-                format!("{e}"),
-            );
+            crate::logger::error_message("bootstrap_hook.compile_failed", format!("{e}"));
             return HookOutcome::default();
         }
     };
 
     let user_map = user_to_map(user);
-    let tenants_arr = tenants_to_array(&user.id);
+    let tenants_arr = tenants_to_array(&user.id).await;
 
     let mut scope = Scope::new();
     scope.push_constant("user", Dynamic::from(user_map));
@@ -334,10 +376,7 @@ pub fn execute_bootstrap_hook(user: &User) -> HookOutcome {
     scope.push_constant("tenants", Dynamic::from(tenants_arr));
 
     if let Err(e) = engine.run_ast_with_scope(&mut scope, &ast) {
-        crate::logger::error_message(
-            "bootstrap_hook.runtime_error",
-            format!("{e}"),
-        );
+        crate::logger::error_message("bootstrap_hook.runtime_error", format!("{e}"));
     }
 
     let outcome = acc.into_outcome();
@@ -352,7 +391,8 @@ pub fn execute_bootstrap_hook(user: &User) -> HookOutcome {
             "hash={} set_superadmin={:?} deny={:?}",
             hash, outcome.set_superadmin, outcome.deny_reason
         ),
-    );
+    )
+    .await;
 
     outcome
 }
@@ -370,6 +410,7 @@ pub fn test_hook(script: &str, trigger: &str) -> Result<HookOutcome, String> {
         totp_secret: None,
         totp_enabled: false,
         recovery_codes: Vec::new(),
+        passkey_credentials: Vec::new(),
     };
 
     let acc = HookAccumulator::default();
@@ -429,22 +470,14 @@ mod tests {
 
     #[test]
     fn test_add_to_tenant_rejects_invalid_role() {
-        let outcome = test_hook(
-            r#"add_to_tenant("t1", "superadmin");"#,
-            "post-login",
-        )
-        .unwrap();
+        let outcome = test_hook(r#"add_to_tenant("t1", "superadmin");"#, "post-login").unwrap();
         // "superadmin" is not a valid tenant role, should be ignored
         assert!(outcome.add_to_tenants.is_empty());
     }
 
     #[test]
     fn test_set_claim() {
-        let outcome = test_hook(
-            r#"set_claim("org_name", "Acme Corp");"#,
-            "post-login",
-        )
-        .unwrap();
+        let outcome = test_hook(r#"set_claim("org_name", "Acme Corp");"#, "post-login").unwrap();
         assert_eq!(
             outcome.extra_claims,
             vec![("org_name".to_string(), "Acme Corp".to_string())]
@@ -475,11 +508,7 @@ mod tests {
 
     #[test]
     fn test_event_context() {
-        let outcome = test_hook(
-            r#"log(event);"#,
-            "post-registration",
-        )
-        .unwrap();
+        let outcome = test_hook(r#"log(event);"#, "post-registration").unwrap();
         assert_eq!(outcome.log_messages, vec!["post-registration"]);
     }
 
@@ -579,7 +608,10 @@ mod tests {
     fn test_sha256_hex_different_scripts() {
         let hash1 = store::sha256_hex("log(1);");
         let hash2 = store::sha256_hex("log(2);");
-        assert_ne!(hash1, hash2, "different scripts should produce different hashes");
+        assert_ne!(
+            hash1, hash2,
+            "different scripts should produce different hashes"
+        );
     }
 
     #[test]

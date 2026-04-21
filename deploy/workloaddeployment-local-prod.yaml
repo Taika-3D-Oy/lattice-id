@@ -1,0 +1,90 @@
+apiVersion: runtime.wasmcloud.dev/v1alpha1
+kind: WorkloadDeployment
+metadata:
+  name: lattice-id
+  annotations:
+    description: Lattice-ID local-prod — email verification enforced, registration gated
+spec:
+  replicas: 1
+  deployPolicy: RollingUpdate
+  template:
+    labels:
+      app.kubernetes.io/name: lattice-id
+      app.kubernetes.io/component: authority
+    spec:
+      components:
+        - name: oidc-gateway
+          image: kind-registry:5000/lattice-id/oidc-gateway:dev
+          maxInvocations: 100
+          localResources:
+            environment:
+              config:
+                issuer_url: http://localhost:8000
+                kv_prefix: lid
+        - name: password-hasher
+          image: kind-registry:5000/lattice-id/password-hasher:dev
+          maxInvocations: 8
+        - name: email-worker
+          image: kind-registry:5000/lattice-id/email-worker:dev
+          maxInvocations: 10
+        - name: abuse-protection
+          image: kind-registry:5000/lattice-id/abuse-protection:dev
+          maxInvocations: 100
+        - name: key-manager
+          image: kind-registry:5000/lattice-id/key-manager:dev
+          maxInvocations: 100
+        - name: region-authority
+          image: kind-registry:5000/lattice-id/region-authority:dev
+          maxInvocations: 100
+        - name: crypto-vault
+          image: kind-registry:5000/lattice-id/crypto-vault:dev
+          maxInvocations: 100
+          localResources:
+            environment:
+              config:
+                kv_prefix: lid
+                ldb_tenant: "lattice-id"
+        - name: admin-ui-host
+          image: kind-registry:5000/lattice-id/admin-ui-host:dev
+          maxInvocations: 100
+      hostInterfaces:
+        - namespace: wasi
+          package: http
+          interfaces:
+            - incoming-handler
+          config:
+            host: "localhost"
+        - namespace: wasi
+          package: http
+          interfaces:
+            - outgoing-handler
+        - namespace: wasi
+          package: config
+          interfaces:
+            - store
+          config:
+            ldb_tenant: "lattice-id"
+            internal_auth_secret: "__INTERNAL_AUTH_SECRET__"
+            dev_mode: "true"
+            require_email_verification: "true"
+            allow_registration: "false"
+            email_provider: "ses"
+            ses_region: "__SES_REGION__"
+            ses_access_key_id: "__SES_ACCESS_KEY_ID__"
+            ses_secret_access_key: "__SES_SECRET_ACCESS_KEY__"
+            ses_from_address: "__SES_FROM_ADDRESS__"
+            bootstrap_hook: |
+              if user.email == "__SUPERADMIN_EMAIL__" {
+                set_superadmin(true);
+                log("Bootstrap: promoted " + user.email + " to superadmin");
+              } else {
+                deny("Registration is not open — contact an administrator");
+              }
+        - namespace: wasmcloud
+          package: messaging
+          version: 0.2.0
+          interfaces:
+            - consumer
+          config:
+            subscriptions: ""
+            nats_url: "nats://nats-data:4222"

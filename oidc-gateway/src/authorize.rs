@@ -1,6 +1,6 @@
 use crate::store::{self, AuthSession};
 use crate::util;
-use wstd::http::{Body, Response, StatusCode};
+use http::{Response, StatusCode};
 
 #[derive(Default)]
 struct ClaimsRequest {
@@ -37,8 +37,8 @@ fn parse_claims_param(raw: Option<&str>) -> Result<ClaimsRequest, String> {
         return Ok(ClaimsRequest::default());
     };
 
-    let claims_json: serde_json::Value = serde_json::from_str(raw)
-        .map_err(|_| "invalid claims parameter (must be JSON object)")?;
+    let claims_json: serde_json::Value =
+        serde_json::from_str(raw).map_err(|_| "invalid claims parameter (must be JSON object)")?;
     let claims_obj = claims_json
         .as_object()
         .ok_or("invalid claims parameter (must be JSON object)")?;
@@ -60,7 +60,8 @@ fn parse_claims_param(raw: Option<&str>) -> Result<ClaimsRequest, String> {
             }
             push_unique(output, claim_name);
 
-            if target == "id_token" && claim_name == "acr"
+            if target == "id_token"
+                && claim_name == "acr"
                 && let Some(descriptor) = descriptor.as_object()
             {
                 if let Some(value) = descriptor.get("value").and_then(|value| value.as_str()) {
@@ -86,7 +87,7 @@ fn authorize_error_redirect(
     state: &str,
     error: &str,
     description: &str,
-) -> Response<Body> {
+) -> Response<String> {
     let separator = if redirect_uri.contains('?') { '&' } else { '?' };
     let mut location = format!(
         "{redirect_uri}{separator}error={}&error_description={}",
@@ -101,7 +102,7 @@ fn authorize_error_redirect(
     Response::builder()
         .status(StatusCode::FOUND)
         .header("location", location)
-        .body(Body::empty())
+        .body(String::new())
         .unwrap()
 }
 
@@ -114,14 +115,10 @@ async fn validate_id_token_hint(
         return Ok(None);
     };
 
-    let claims = crate::service_client::verify_token_scoped(
-        raw_hint,
-        Some(issuer),
-        Some(client_id),
-        None,
-    )
-    .await
-    .map_err(|_| "invalid id_token_hint")?;
+    let claims =
+        crate::service_client::verify_token_scoped(raw_hint, Some(issuer), Some(client_id), None)
+            .await
+            .map_err(|_| "invalid id_token_hint")?;
 
     if claims
         .get("token_type")
@@ -136,7 +133,8 @@ async fn validate_id_token_hint(
         .and_then(|value| value.as_str())
         .filter(|value| !value.is_empty())
         .ok_or("invalid id_token_hint")?;
-    let user = store::get_user(user_id)?
+    let user = store::get_user(user_id)
+        .await?
         .filter(|user| user.status == "active")
         .ok_or("invalid id_token_hint")?;
 
@@ -147,7 +145,7 @@ async fn validate_id_token_hint(
 }
 
 /// Handle GET /authorize — validate PKCE params, store session, serve login page.
-pub async fn handle(query: &str, issuer: &str) -> Result<Response<Body>, String> {
+pub async fn handle(query: &str, issuer: &str) -> Result<Response<String>, String> {
     let params = util::parse_query(query);
     let get = |key: &str| -> Option<&str> {
         params
@@ -166,8 +164,8 @@ pub async fn handle(query: &str, issuer: &str) -> Result<Response<Body>, String>
     let redirect_uri = get("redirect_uri").ok_or("missing redirect_uri")?;
     let code_challenge = get("code_challenge").ok_or("missing code_challenge (PKCE required)")?;
     let code_challenge_method = get("code_challenge_method").unwrap_or("S256");
-    if code_challenge_method != "S256" && code_challenge_method != "plain" {
-        return Err("only S256/plain code_challenge_method is supported".into());
+    if code_challenge_method != "S256" {
+        return Err("only S256 code_challenge_method is supported".into());
     }
 
     let prompt = get("prompt").unwrap_or("");
@@ -194,9 +192,9 @@ pub async fn handle(query: &str, issuer: &str) -> Result<Response<Body>, String>
             state
         );
         return Ok(Response::builder()
-            .status(wstd::http::StatusCode::FOUND)
+            .status(http::StatusCode::FOUND)
             .header("location", &err_redirect)
-            .body(Body::empty())
+            .body(String::new())
             .unwrap());
     }
     // prompt=login: Force re-authentication (default behavior of this endpoint).
@@ -214,8 +212,9 @@ pub async fn handle(query: &str, issuer: &str) -> Result<Response<Body>, String>
     }
 
     // Validate client
-    let client =
-        store::get_client(client_id)?.ok_or_else(|| format!("unknown client_id: {client_id}"))?;
+    let client = store::get_client(client_id)
+        .await?
+        .ok_or_else(|| format!("unknown client_id: {client_id}"))?;
 
     // Validate redirect_uri
     if !client.redirect_uris.iter().any(|u| u == redirect_uri) {
@@ -236,6 +235,13 @@ pub async fn handle(query: &str, issuer: &str) -> Result<Response<Body>, String>
 
     // Store auth session
     let session_id = store::random_hex(16);
+    // Require consent when:
+    //  - explicitly requested with prompt=consent, OR
+    //  - the client is not first-party (and not the built-in admin/default clients)
+    let builtin_clients = ["lid-admin", "lid-default"];
+    let is_first_party =
+        client.first_party || builtin_clients.contains(&client_id) || crate::is_dev_mode(); // dev mode skips consent for convenience
+    let needs_consent = prompt == "consent" || !is_first_party;
     let session = AuthSession {
         client_id: client_id.to_string(),
         redirect_uri: redirect_uri.to_string(),
@@ -254,9 +260,10 @@ pub async fn handle(query: &str, issuer: &str) -> Result<Response<Body>, String>
             .map(|hint| hint.email.clone())
             .or_else(|| login_hint.filter(|h| !h.is_empty()).map(|h| h.to_string())),
         created_at: store::unix_now(),
+        needs_consent,
     };
-    store::save_auth_session(&session_id, &session)?;
+    store::save_auth_session(&session_id, &session).await?;
 
     // Serve login page
-    Ok(crate::login::login_page(&session_id, None))
+    Ok(crate::login::login_page(&session_id, None).await)
 }

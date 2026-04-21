@@ -17,6 +17,9 @@ pub struct AuthContext {
     pub set_token: WriteSignal<String>,
     pub issuer_url: ReadSignal<String>,
     pub set_issuer_url: WriteSignal<String>,
+    /// Becomes true once the OIDC callback has been fully processed (or there was none).
+    pub auth_ready: ReadSignal<bool>,
+    pub set_auth_ready: WriteSignal<bool>,
 }
 
 // ── Defaults ────────────────────────────────────────────────
@@ -30,12 +33,8 @@ pub fn default_issuer_url() -> String {
     }
     // Fall back to current origin or localhost
     let window = web_sys::window().unwrap();
-    let hostname = window.location().hostname().unwrap_or_default();
-    if hostname == "localhost" || hostname == "127.0.0.1" {
-        "http://localhost:8000".into()
-    } else {
-        window.location().origin().unwrap_or_default()
-    }
+    // Use current origin — the admin UI is served by the same gateway
+    window.location().origin().unwrap_or_default()
 }
 
 pub fn default_client_id() -> String {
@@ -45,13 +44,24 @@ pub fn default_client_id() -> String {
 pub fn default_redirect_uri() -> String {
     if let Ok(v) = LocalStorage::get::<String>(REDIRECT_URI_KEY) {
         if !v.is_empty() {
-            return v;
+            // Discard any cached value that accidentally contains a port number,
+            // so old broken values self-heal on next load.
+            let has_port = v.split("//").nth(1).map(|rest| {
+                rest.split('/').next().unwrap_or("").contains(':')
+            }).unwrap_or(false);
+            if !has_port {
+                return v;
+            }
         }
     }
     let window = web_sys::window().unwrap();
-    let origin = window.location().origin().unwrap_or_default();
-    let pathname = window.location().pathname().unwrap_or_else(|_| "/".into());
-    format!("{origin}{pathname}")
+    let location = window.location();
+    // Build the URI from protocol + hostname (no port) + pathname so it always
+    // points at the gateway regardless of which dev port Trunk is running on.
+    let protocol = location.protocol().unwrap_or_else(|_| "https:".into());
+    let hostname = location.hostname().unwrap_or_default();
+    let pathname = location.pathname().unwrap_or_else(|_| "/".into());
+    format!("{protocol}//{hostname}{pathname}")
 }
 
 // ── Check for OIDC callback ────────────────────────────────
@@ -60,6 +70,7 @@ pub fn check_callback(ctx: AuthContext) {
     let window = web_sys::window().unwrap();
     let search = window.location().search().unwrap_or_default();
     if !search.contains("code=") {
+        ctx.set_auth_ready.set(true);
         return;
     }
 
@@ -98,6 +109,7 @@ pub fn check_callback(ctx: AuthContext) {
             Ok(token) => ctx.set_token.set(token),
             Err(e) => log::error!("token exchange failed: {e}"),
         }
+        ctx.set_auth_ready.set(true);
     });
 }
 

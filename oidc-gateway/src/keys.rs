@@ -28,20 +28,28 @@ pub struct KeyStore {
 }
 
 impl KeyStore {
-    /// Load signing keys (JWKS) from the key-manager component.
-    pub fn load() -> Result<Self, String> {
+    /// Load signing keys from the key-manager component (JWK string cached).
+    pub async fn load() -> Result<Self, String> {
         let jwk_str = crate::bindings::taika3d::lid::keys::get_public_key()?;
         let jwk: serde_json::Value = serde_json::from_str(&jwk_str).map_err(|e| e.to_string())?;
-        
-        // Split JWK into VerifyingKey
-        let n_b64 = jwk.get("n").and_then(|v| v.as_str()).ok_or("JWK missing n")?;
-        let e_b64 = jwk.get("e").and_then(|v| v.as_str()).ok_or("JWK missing e")?;
-        let kid = jwk.get("kid").and_then(|v| v.as_str()).ok_or("JWK missing kid")?;
-        
+
+        let n_b64 = jwk
+            .get("n")
+            .and_then(|v| v.as_str())
+            .ok_or("JWK missing n")?;
+        let e_b64 = jwk
+            .get("e")
+            .and_then(|v| v.as_str())
+            .ok_or("JWK missing e")?;
+        let kid = jwk
+            .get("kid")
+            .and_then(|v| v.as_str())
+            .ok_or("JWK missing kid")?;
+
         let n = decode_biguint(n_b64, "n")?;
         let e = decode_biguint(e_b64, "e")?;
         let public_key = RsaPublicKey::new(n, e).map_err(|e| e.to_string())?;
-        
+
         let current = SigningKeyPair {
             kid: kid.to_string(),
             verifying_key: VerifyingKey::<Sha256>::new(public_key),
@@ -49,7 +57,10 @@ impl KeyStore {
             created_at: 0,
         };
 
-        Ok(Self { current, previous: Vec::new() })
+        Ok(Self {
+            current,
+            previous: Vec::new(),
+        })
     }
 
     /// Combined JWKS including current key and all active retired keys.
@@ -126,7 +137,7 @@ impl KeyStore {
     }
 }
 
-// ── Serialization types (must match core-service's export format) ──
+// ── Serialization types (must match key-manager's export format) ──
 
 #[derive(Serialize, Deserialize)]
 struct ExportedKeyStore {

@@ -7,7 +7,7 @@
 use crate::bindings::lattice_id::notify::email;
 
 /// Send an email notification.  Errors are logged but never propagated.
-pub fn publish_email_event(
+pub async fn publish_email_event(
     event_type: &str,
     to: &str,
     name: &str,
@@ -28,19 +28,19 @@ pub fn publish_email_event(
 }
 
 /// Convenience: publish a "verify_email" event with a pre-built URL.
-pub fn send_verification_email(issuer: &str, to: &str, name: &str, token: &str) {
+pub async fn send_verification_email(issuer: &str, to: &str, name: &str, token: &str) {
     let url = format!("{issuer}/verify/email?token={token}");
-    publish_email_event("verify_email", to, name, &url, serde_json::json!({}));
+    publish_email_event("verify_email", to, name, &url, serde_json::json!({})).await;
 }
 
 /// Convenience: publish a "password_reset" event.
-pub fn send_password_reset_email(issuer: &str, to: &str, name: &str, token: &str) {
+pub async fn send_password_reset_email(issuer: &str, to: &str, name: &str, token: &str) {
     let url = format!("{issuer}/password-reset/complete?token={token}");
-    publish_email_event("password_reset", to, name, &url, serde_json::json!({}));
+    publish_email_event("password_reset", to, name, &url, serde_json::json!({})).await;
 }
 
 /// Convenience: publish an "invitation" event.
-pub fn send_invitation_email(
+pub async fn send_invitation_email(
     issuer: &str,
     to: &str,
     token: &str,
@@ -57,5 +57,6 @@ pub fn send_invitation_email(
             "tenant_name": tenant_name,
             "role": role,
         }),
-    );
+    )
+    .await;
 }

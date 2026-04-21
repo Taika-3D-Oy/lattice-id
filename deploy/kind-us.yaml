@@ -1,17 +1,21 @@
 # Kind cluster config for US region (separate cluster per region).
-# Gateway exposed on host port 8001.
+# Gateway exposed on host port 8001 (external) and 80 (cross-region internal).
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
   - role: control-plane
     extraPortMappings:
-      # Runtime gateway (HTTP traffic) — port aligned with NodePort
+      # Runtime gateway (HTTP traffic) — external test access
       - containerPort: 8001
         hostPort: 8001
+        protocol: TCP
+      # Cross-region HTTP on port 80 — Host header omits default port
+      - containerPort: 80
+        hostPort: 0
         protocol: TCP
 kubeadmConfigPatches:
   - |
     kind: ClusterConfiguration
     apiServer:
       extraArgs:
-        service-node-port-range: "8000-32767"
+        service-node-port-range: "80-32767"

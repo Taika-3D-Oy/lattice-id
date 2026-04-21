@@ -1,6 +1,8 @@
 mod app;
 mod api;
 mod auth;
+mod util;
+mod webauthn;
 mod views;
 
 fn main() {

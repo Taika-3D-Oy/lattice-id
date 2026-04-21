@@ -7,12 +7,12 @@ source "$SCRIPT_DIR/lib.sh"
 trap cleanup EXIT
 
 echo "==> Starting rate limiting integration test"
-start_wash_dev
+wait_for_cluster
 
 # 1. Test /register rate limiting (Task 1.4)
 # Per lib.rs handle_register: 3 attempts per 1 hour per EMAIL.
 echo "==> Testing /register rate limiting (per email)"
-EMAIL="rate_limit_test@example.com"
+EMAIL="rate_limit_test_$(date +%s)@example.com"
 for i in {1..3}; do
   status=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE_URL/register" \
     -H 'content-type: application/json' \

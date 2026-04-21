@@ -1,8 +1,0 @@
-package lattice-id:core;
-
-world service {
-    import taika3d:lid/keyvalue-nats-cas;
-    import wasi:config/store@0.2.0-rc.1;
-    import wasi:http/outgoing-handler@0.2.2;
-    import wasmcloud:messaging/consumer@0.2.0;
-}

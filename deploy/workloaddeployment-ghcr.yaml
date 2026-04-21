@@ -1,0 +1,88 @@
+apiVersion: runtime.wasmcloud.dev/v1alpha1
+kind: WorkloadDeployment
+metadata:
+  name: lattice-id
+  annotations:
+    description: Lattice-ID authority workload (GHCR images for CI / external use)
+    # Images are published by CI on push to master (:latest) and on tags (:v1.x.x).
+    # Replace :latest with a pinned tag for reproducible deployments.
+    # Substitute __PLACEHOLDERS__ with sed before applying:
+    #   sed -e 's|__ISSUER_URL__|http://localhost:8000|' \
+    #       -e 's|__HOST__|localhost|' \
+    #       -e 's|__INTERNAL_AUTH_SECRET__|my-secret|' \
+    #       -e 's|__EMAIL_PROVIDER__|log|' \
+    #       -e 's|__NATS_URL__|nats://nats-data:4222|' \
+    #       deploy/workloaddeployment-ghcr.yaml | kubectl apply -f -
+spec:
+  replicas: 1
+  deployPolicy: RollingUpdate
+  template:
+    labels:
+      app.kubernetes.io/name: lattice-id
+      app.kubernetes.io/component: authority
+    spec:
+      components:
+        - name: oidc-gateway
+          image: ghcr.io/taika-3d-oy/lattice-id/oidc-gateway:latest
+          maxInvocations: 100
+          localResources:
+            environment:
+              config:
+                issuer_url: __ISSUER_URL__
+                kv_prefix: lid
+                ldb_tenant: lattice-id
+        - name: password-hasher
+          image: ghcr.io/taika-3d-oy/lattice-id/password-hasher:latest
+          maxInvocations: 8
+        - name: email-worker
+          image: ghcr.io/taika-3d-oy/lattice-id/email-worker:latest
+          maxInvocations: 10
+        - name: abuse-protection
+          image: ghcr.io/taika-3d-oy/lattice-id/abuse-protection:latest
+          maxInvocations: 100
+        - name: key-manager
+          image: ghcr.io/taika-3d-oy/lattice-id/key-manager:latest
+          maxInvocations: 100
+        - name: region-authority
+          image: ghcr.io/taika-3d-oy/lattice-id/region-authority:latest
+          maxInvocations: 100
+        - name: crypto-vault
+          image: ghcr.io/taika-3d-oy/lattice-id/crypto-vault:latest
+          maxInvocations: 100
+          localResources:
+            environment:
+              config:
+                kv_prefix: lid
+                ldb_tenant: lattice-id
+        - name: admin-ui-host
+          image: ghcr.io/taika-3d-oy/lattice-id/admin-ui-host:latest
+          maxInvocations: 100
+      hostInterfaces:
+        - namespace: wasi
+          package: http
+          interfaces:
+            - incoming-handler
+          config:
+            host: __HOST__
+        - namespace: wasi
+          package: config
+          interfaces:
+            - store
+          config:
+            # Override these for your environment:
+            internal_auth_secret: __INTERNAL_AUTH_SECRET__
+            dev_mode: "false"
+            require_email_verification: "true"
+            allow_registration: "true"
+            email_provider: __EMAIL_PROVIDER__
+            bootstrap_hook: |
+              set_superadmin(true);
+              log("Bootstrap: promoted " + user.email + " to superadmin");
+        - namespace: wasmcloud
+          package: messaging
+          version: 0.2.0
+          interfaces:
+            - consumer
+          config:
+            subscriptions: ""
+            nats_url: __NATS_URL__

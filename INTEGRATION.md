@@ -270,13 +270,13 @@ const tokens = await response.json();
 
 ### Rust/egui (Wasm) Frontend
 
-For Rust browser apps using egui, the PKCE flow is the same but using `ehttp` for the token exchange and `web-sys` for localStorage/crypto. See the taika-admin-ui integration in this repo for a working example.
+For Rust browser apps using egui, the PKCE flow is the same but using `ehttp` for the token exchange and `web-sys` for localStorage/crypto. See the `admin-ui` directory in this repo for a working Leptos example.
 
 ## Step 4: Deployment
 
 ### Option A: Same workload
 
-Add the Lattice-ID components alongside your application in the same `WorkloadDeployment`. See [manifests/workloaddeployment.yaml](manifests/workloaddeployment.yaml) for the base manifest.
+Add the Lattice-ID components alongside your application in the same `WorkloadDeployment`. See [deploy/workloaddeployment-local.yaml](deploy/workloaddeployment-local.yaml) for an example manifest.
 
 ### Option B: Separate workloads
 

@@ -1,7 +1,7 @@
 package taika3d:lid;
 
 world abuse-protection {
-    import keyvalue-nats-cas;
-    
+    import wasi:config/store@0.2.0-rc.1;
+    import wasmcloud:messaging/consumer@0.2.0;
     export abuse;
 }

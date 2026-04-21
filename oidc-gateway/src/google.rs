@@ -1,11 +1,11 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use http::{Response, StatusCode};
 use num_bigint_dig::BigUint;
 use rsa::RsaPublicKey;
 use rsa::pkcs1v15::{Signature, VerifyingKey};
 use rsa::signature::Verifier;
 use sha2::Sha256;
 use std::time::{SystemTime, UNIX_EPOCH};
-use wstd::http::{Body, Response, StatusCode};
 
 use crate::store;
 use crate::util;
@@ -27,7 +27,7 @@ fn google_jwks_url() -> &'static str {
 }
 
 /// Handle GET /auth/google?session_id=... — redirect to Google's OAuth2 consent screen.
-pub fn start(query: &str, issuer: &str) -> Result<Response<Body>, String> {
+pub async fn start(query: &str, issuer: &str) -> Result<Response<String>, String> {
     let params = util::parse_query(query);
     let session_id = params
         .iter()
@@ -36,18 +36,24 @@ pub fn start(query: &str, issuer: &str) -> Result<Response<Body>, String> {
         .ok_or("missing session_id")?;
 
     // Validate the auth session still exists
-    let session = store::get_auth_session(session_id)?.ok_or("invalid or expired session")?;
+    let session = store::get_auth_session(session_id)
+        .await?
+        .ok_or("invalid or expired session")?;
 
     // Check auth session expiry
     if store::unix_now() > session.created_at + 600 {
         return Err("auth session expired".into());
     }
 
-    let idp =
-        store::get_identity_provider_by_type("google")?.ok_or("Google login is not configured")?;
+    let idp = store::get_identity_provider_by_type("google")
+        .await?
+        .ok_or("Google login is not configured")?;
 
-    // Build state = session_id (we'll verify on callback)
-    let state = session_id;
+    // Generate a separate CSRF token for the state parameter instead of
+    // exposing the raw session_id in Google's URL / browser history / Referer.
+    let csrf_token = store::random_hex(16);
+    store::save_google_csrf(&csrf_token, session_id).await?;
+    let state = &csrf_token;
 
     let callback_url = format!("{issuer}/auth/google/callback");
     let mut google_url = format!(
@@ -67,12 +73,16 @@ pub fn start(query: &str, issuer: &str) -> Result<Response<Body>, String> {
         .status(StatusCode::FOUND)
         .header("location", &google_url)
         .header("cache-control", "no-store")
-        .body(Body::empty())
+        .body(String::new())
         .unwrap())
 }
 
 /// Handle GET /auth/google/callback?code=...&state=... — exchange code for id_token.
-pub async fn callback(query: &str, issuer: &str, remote_ip: &str) -> Result<Response<Body>, String> {
+pub async fn callback(
+    query: &str,
+    issuer: &str,
+    remote_ip: &str,
+) -> Result<Response<String>, String> {
     let params = util::parse_query(query);
     let get = |key: &str| -> Option<&str> {
         params
@@ -83,29 +93,38 @@ pub async fn callback(query: &str, issuer: &str, remote_ip: &str) -> Result<Resp
 
     let code = get("code").ok_or("missing code from Google")?;
     let state = get("state").ok_or("missing state")?;
-    let session_id = state; // state = session_id
+
+    // Resolve CSRF token → session_id (single-use)
+    let session_id = store::consume_google_csrf(state)
+        .await?
+        .ok_or("invalid or expired OAuth state")?;
 
     // Validate auth session
-    let session = store::get_auth_session(session_id)?.ok_or("invalid or expired session")?;
+    let session = store::get_auth_session(&session_id)
+        .await?
+        .ok_or("invalid or expired session")?;
 
     // Check auth session expiry
     if store::unix_now() > session.created_at + 600 {
         return Ok(crate::login::login_page(
-            session_id,
+            &session_id,
             Some("Auth session expired. Please start over."),
-        ));
+        )
+        .await);
     }
 
     // Check for error from Google
     if let Some(error) = get("error") {
         return Ok(crate::login::login_page(
-            session_id,
+            &session_id,
             Some(&format!("Google login failed: {error}")),
-        ));
+        )
+        .await);
     }
 
-    let idp =
-        store::get_identity_provider_by_type("google")?.ok_or("Google login is not configured")?;
+    let idp = store::get_identity_provider_by_type("google")
+        .await?
+        .ok_or("Google login is not configured")?;
 
     let callback_url = format!("{issuer}/auth/google/callback");
 
@@ -125,7 +144,8 @@ pub async fn callback(query: &str, issuer: &str, remote_ip: &str) -> Result<Resp
         .and_then(|v| v.as_str())
         .ok_or("missing id_token from Google")?;
 
-    let google_claims = verify_google_id_token(id_token_str, &idp.client_id, &session.nonce).await?;
+    let google_claims =
+        verify_google_id_token(id_token_str, &idp.client_id, &session.nonce).await?;
 
     let google_sub = google_claims
         .get("sub")
@@ -146,16 +166,19 @@ pub async fn callback(query: &str, issuer: &str, remote_ip: &str) -> Result<Resp
 
     if !email_verified {
         return Ok(crate::login::login_page(
-            session_id,
+            &session_id,
             Some("Google account email is not verified"),
-        ));
+        )
+        .await);
     }
 
     // Look up existing social identity link
-    let user = if let Some(si) = store::get_social_identity("google", google_sub)? {
+    let user = if let Some(si) = store::get_social_identity("google", google_sub).await? {
         // Known Google identity → get linked user
-        store::get_user(&si.user_id)?.ok_or("linked user not found")?
-    } else if let Some(existing_user) = store::get_user_by_email(google_email)? {
+        store::get_user(&si.user_id)
+            .await?
+            .ok_or("linked user not found")?
+    } else if let Some(existing_user) = store::get_user_by_email(google_email).await? {
         // Email matches an existing user → auto-link
         let si = store::SocialIdentity {
             provider: "google".to_string(),
@@ -164,21 +187,23 @@ pub async fn callback(query: &str, issuer: &str, remote_ip: &str) -> Result<Resp
             email: google_email.to_string(),
             linked_at: store::unix_now(),
         };
-        store::save_social_identity(&si)?;
+        store::save_social_identity(&si).await?;
         let _ = store::log_audit(
             "social_identity_linked",
             &existing_user.id,
             &existing_user.id,
             "google (auto-linked by email)",
-        );
+        )
+        .await;
         existing_user
     } else {
         // New user — gate registration
-        if !crate::is_registration_allowed() {
+        if !crate::is_registration_allowed().await {
             return Ok(crate::login::login_page(
-                session_id,
+                &session_id,
                 Some("Registration is currently closed"),
-            ));
+            )
+            .await);
         }
 
         // Auto-create from Google profile.
@@ -196,8 +221,9 @@ pub async fn callback(query: &str, issuer: &str, remote_ip: &str) -> Result<Resp
             totp_secret: None,
             totp_enabled: false,
             recovery_codes: Vec::new(),
+            passkey_credentials: Vec::new(),
         };
-        store::create_user(&user)?;
+        store::create_user(&user).await?;
 
         // Link the social identity
         let si = store::SocialIdentity {
@@ -207,37 +233,34 @@ pub async fn callback(query: &str, issuer: &str, remote_ip: &str) -> Result<Resp
             email: google_email.to_string(),
             linked_at: store::unix_now(),
         };
-        store::save_social_identity(&si)?;
+        store::save_social_identity(&si).await?;
 
-        let _ = store::log_audit("user_registered_social", &user.id, &user.id, "google");
+        let _ = store::log_audit("user_registered_social", &user.id, &user.id, "google").await;
 
         // Bootstrap hook: config-supplied Rhai script for zero-credential setup
-        let boot = crate::hooks::execute_bootstrap_hook(&user);
+        let boot = crate::hooks::execute_bootstrap_hook(&user).await;
         if let Some(reason) = &boot.deny_reason {
             let _ = store::log_audit(
                 "registration_denied_by_bootstrap_hook",
                 &user.id,
                 &user.id,
-                &reason,
-            );
-            return Ok(crate::login::login_page(session_id, Some(&reason)));
+                reason,
+            )
+            .await;
+            return Ok(crate::login::login_page(&session_id, Some(reason)).await);
         }
-        if let Err(e) = crate::hooks::apply_outcome(&mut user, &boot) {
+        if let Err(e) = crate::hooks::apply_outcome(&mut user, &boot).await {
             crate::logger::error_message("bootstrap_hook.apply_failed", e);
         }
 
         // Execute post-registration hooks for social signups
-        let outcome = crate::hooks::execute_hooks("post-registration", &user);
+        let outcome = crate::hooks::execute_hooks("post-registration", &user).await;
         if let Some(reason) = &outcome.deny_reason {
-            let _ = store::log_audit(
-                "registration_denied_by_hook",
-                &user.id,
-                &user.id,
-                &reason,
-            );
-            return Ok(crate::login::login_page(session_id, Some(&reason)));
+            let _ =
+                store::log_audit("registration_denied_by_hook", &user.id, &user.id, reason).await;
+            return Ok(crate::login::login_page(&session_id, Some(reason)).await);
         }
-        if let Err(e) = crate::hooks::apply_outcome(&mut user, &outcome) {
+        if let Err(e) = crate::hooks::apply_outcome(&mut user, &outcome).await {
             crate::logger::error_message("hooks.apply_failed", e);
         }
 
@@ -245,10 +268,7 @@ pub async fn callback(query: &str, issuer: &str, remote_ip: &str) -> Result<Resp
     };
 
     if user.status != "active" {
-        return Ok(crate::login::login_page(
-            session_id,
-            Some("Account is not active"),
-        ));
+        return Ok(crate::login::login_page(&session_id, Some("Account is not active")).await);
     }
 
     // MFA check: if TOTP is enabled, require MFA even for social login
@@ -261,85 +281,39 @@ pub async fn callback(query: &str, issuer: &str, remote_ip: &str) -> Result<Resp
             expires_at: store::unix_now() + 300,
             remote_ip: remote_ip.to_string(),
         };
-        store::save_mfa_pending(&mfa_token, &pending)?;
-        return Ok(crate::login::mfa_page(&mfa_token, session_id, None));
+        store::save_mfa_pending(&mfa_token, &pending).await?;
+        return Ok(crate::login::mfa_page(&mfa_token, &session_id, None).await);
     }
 
     // Complete login (issue auth code, redirect to client)
-    let _ = store::log_audit("login_success", &user.id, &user.id, "google");
-    crate::login::complete_login(&user, session_id, "google", remote_ip).await
+    let _ = store::log_audit("login_success", &user.id, &user.id, "google").await;
+    crate::login::complete_login(&user, &session_id, "google", remote_ip).await
 }
 
 /// Make an HTTP POST request with form-urlencoded body.
 async fn http_post(url: &str, body: &str) -> Result<serde_json::Value, String> {
-    let request = wstd::http::Request::builder()
-        .method(wstd::http::Method::POST)
-        .uri(url)
-        .header("content-type", "application/x-www-form-urlencoded")
-        .header("accept", "application/json")
-        .body(Body::from(body.to_string()))
-        .map_err(|e| format!("build request: {e}"))?;
-
-    let response = wstd::http::Client::new()
-        .send(request)
-        .await
-        .map_err(|e| format!("HTTP request failed: {e}"))?;
-
-    let status = response.status();
-    let mut resp_body = response.into_body();
-    let bytes = resp_body
-        .contents()
-        .await
-        .map_err(|e| format!("read body: {e}"))?;
-
-    if !status.is_success() {
-        let body_str = String::from_utf8_lossy(bytes);
+    let (status, json) = crate::http_client::post_form_json(url, body).await?;
+    if !(200..300).contains(&status) {
         crate::logger::warn(
             "google.token_exchange_failed",
             serde_json::json!({
-                "status": status.as_u16(),
-                "response": body_str.to_string(),
+                "status": status,
+                "response": json.to_string(),
             }),
         );
         return Err("token exchange with Google failed".into());
     }
-
-    serde_json::from_slice(bytes).map_err(|e| format!("parse response: {e}"))
+    Ok(json)
 }
 
 async fn http_get_json(url: &str) -> Result<serde_json::Value, String> {
-    let request = wstd::http::Request::builder()
-        .method(wstd::http::Method::GET)
-        .uri(url)
-        .header("accept", "application/json")
-        .body(Body::empty())
-        .map_err(|e| format!("build request: {e}"))?;
-
-    let response = wstd::http::Client::new()
-        .send(request)
-        .await
-        .map_err(|e| format!("HTTP request failed: {e}"))?;
-
-    let status = response.status();
-    let mut resp_body = response.into_body();
-    let bytes = resp_body
-        .contents()
-        .await
-        .map_err(|e| format!("read body: {e}"))?;
-
-    if !status.is_success() {
-        let body_str = String::from_utf8_lossy(bytes);
+    crate::http_client::get_json(url, &[]).await.map_err(|e| {
         crate::logger::warn(
             "google.jwks_fetch_failed",
-            serde_json::json!({
-                "status": status.as_u16(),
-                "response": body_str.to_string(),
-            }),
+            serde_json::json!({ "error": e }),
         );
-        return Err("failed to fetch Google signing keys".into());
-    }
-
-    serde_json::from_slice(bytes).map_err(|e| format!("parse response: {e}"))
+        "failed to fetch Google signing keys".into()
+    })
 }
 
 async fn verify_google_id_token(
@@ -379,7 +353,8 @@ fn verify_google_signature(token: &str, kid: &str, jwks: &serde_json::Value) -> 
     let sig_bytes = URL_SAFE_NO_PAD
         .decode(parts[2])
         .map_err(|e| format!("signature decode: {e}"))?;
-    let sig = Signature::try_from(sig_bytes.as_slice()).map_err(|e| format!("bad signature: {e}"))?;
+    let sig =
+        Signature::try_from(sig_bytes.as_slice()).map_err(|e| format!("bad signature: {e}"))?;
 
     let keys = jwks
         .get("keys")
@@ -511,8 +486,7 @@ mod tests {
         });
 
         assert_eq!(
-            validate_google_claims(&claims, "google-client-id", "expected-nonce")
-                .unwrap_err(),
+            validate_google_claims(&claims, "google-client-id", "expected-nonce").unwrap_err(),
             "invalid Google token audience"
         );
     }
@@ -528,8 +502,7 @@ mod tests {
         });
 
         assert_eq!(
-            validate_google_claims(&claims, "google-client-id", "expected-nonce")
-                .unwrap_err(),
+            validate_google_claims(&claims, "google-client-id", "expected-nonce").unwrap_err(),
             "invalid Google token issuer"
         );
     }
@@ -545,8 +518,7 @@ mod tests {
         });
 
         assert_eq!(
-            validate_google_claims(&claims, "google-client-id", "expected-nonce")
-                .unwrap_err(),
+            validate_google_claims(&claims, "google-client-id", "expected-nonce").unwrap_err(),
             "Google id_token expired"
         );
     }
@@ -562,8 +534,7 @@ mod tests {
         });
 
         assert_eq!(
-            validate_google_claims(&claims, "google-client-id", "expected-nonce")
-                .unwrap_err(),
+            validate_google_claims(&claims, "google-client-id", "expected-nonce").unwrap_err(),
             "invalid Google token nonce"
         );
     }

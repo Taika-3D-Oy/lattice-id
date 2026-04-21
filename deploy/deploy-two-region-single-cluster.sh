@@ -46,23 +46,21 @@ fi
 
 build_and_push() {
   log "Building workspace (release)"
-  cargo build --workspace --target wasm32-wasip2 --release
+  cargo build --workspace --target wasm32-wasip3 --release
 
   log "Pushing components to local registry"
-  wash oci push --insecure "localhost:${REGISTRY_PORT}/lattice-id/core-service:dev" \
-    target/wasm32-wasip2/release/core-service.wasm
   wash oci push --insecure "localhost:${REGISTRY_PORT}/lattice-id/oidc-gateway:dev" \
-    target/wasm32-wasip2/release/oidc_gateway.wasm
+    target/wasm32-wasip3/release/oidc_gateway.wasm
   wash oci push --insecure "localhost:${REGISTRY_PORT}/lattice-id/password-hasher:dev" \
-    target/wasm32-wasip2/release/password_hasher.wasm
+    target/wasm32-wasip3/release/password_hasher.wasm
   wash oci push --insecure "localhost:${REGISTRY_PORT}/lattice-id/email-worker:dev" \
-    target/wasm32-wasip2/release/email_worker.wasm
+    target/wasm32-wasip3/release/email_worker.wasm
   wash oci push --insecure "localhost:${REGISTRY_PORT}/lattice-id/abuse-protection:dev" \
-    target/wasm32-wasip2/release/abuse_protection.wasm
+    target/wasm32-wasip3/release/abuse_protection.wasm
   wash oci push --insecure "localhost:${REGISTRY_PORT}/lattice-id/key-manager:dev" \
-    target/wasm32-wasip2/release/key_manager.wasm
+    target/wasm32-wasip3/release/key_manager.wasm
   wash oci push --insecure "localhost:${REGISTRY_PORT}/lattice-id/region-authority:dev" \
-    target/wasm32-wasip2/release/region_authority.wasm
+    target/wasm32-wasip3/release/region_authority.wasm
 }
 
 if [[ "${1:-}" == "rebuild" ]]; then

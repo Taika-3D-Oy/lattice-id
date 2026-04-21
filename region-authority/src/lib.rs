@@ -3,52 +3,77 @@ mod bindings {
     wit_bindgen::generate!({
         world: "region-authority",
         path: "wit",
+        async: [
+            "import:wasmcloud:messaging/consumer@0.2.0#request",
+            "export:taika3d:lid/authority#lookup",
+        ],
         generate_all,
     });
 }
 
 use bindings::exports::taika3d::lid::authority::{Guest, LookupResult};
-use bindings::taika3d::lid::keyvalue_nats_cas as kv;
-use bindings::taika3d::lid::keyvalue_in_memory as cache_kv;
+use bindings::wasi::config::store as config_store;
+use bindings::wasmcloud::messaging::consumer;
 
 struct RegionAuthority;
 
-fn sanitize_key(key: &str) -> String {
-    key.replace(':', "--").replace('@', "_at_")
+fn user_idx_table() -> String {
+    let prefix = config_store::get("kv_prefix")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "lid".to_string());
+    format!("{prefix}-user-idx")
+}
+
+fn ldb_tenant() -> Option<String> {
+    config_store::get("ldb_tenant")
+        .ok()
+        .flatten()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// Check lattice-db for the email index entry.
+async fn email_exists_in_db(email_hash: &str) -> bool {
+    let key = format!("email:{email_hash}");
+    let mut payload = serde_json::json!({
+        "table": user_idx_table(),
+        "key": key,
+    });
+    if let Some(tenant) = ldb_tenant() {
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert("_partition".to_string(), serde_json::Value::String(tenant));
+    }
+    let body = serde_json::to_vec(&payload).unwrap_or_default();
+    match consumer::request("ldb.exists".to_string(), body, 2000).await {
+        Ok(msg) => {
+            if let Ok(resp) = serde_json::from_slice::<serde_json::Value>(&msg.body) {
+                resp.get("exists")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+            } else {
+                false
+            }
+        }
+        Err(_) => false,
+    }
 }
 
 impl Guest for RegionAuthority {
-    /// Check region-wide NATS KV with per-instance in-memory cache.
-    /// Cross-region HTTP is handled by oidc-gateway.
-    fn lookup(email_hash: String) -> Result<LookupResult, String> {
-        let key = sanitize_key(&format!("email:{}", email_hash));
-
-        // 1. Fast path: check per-instance in-memory cache
-        if let Ok(cache) = cache_kv::open("lid-authority-cache") {
-            if let Ok(Some(_)) = cache.get(&key) {
-                return Ok(LookupResult {
-                    found: true,
-                    region: Some("local".to_string()),
-                });
-            }
-        }
-
-        // 2. Check region-wide NATS JetStream KV (shared across all instances)
-        let idx_bucket = kv::open("lid-user-idx")
-            .map_err(|e| format!("failed to open region index: {e:?}"))?;
-
-        if idx_bucket.exists(&key).map_err(|e| format!("{e:?}"))? {
-            // Populate cache for next time (value doesn't matter, just presence)
-            if let Ok(cache) = cache_kv::open("lid-authority-cache") {
-                let _ = cache.set(&key, b"1");
-            }
-            return Ok(LookupResult {
+    async fn lookup(email_hash: String) -> Result<LookupResult, String> {
+        if email_exists_in_db(&email_hash).await {
+            Ok(LookupResult {
                 found: true,
                 region: Some("local".to_string()),
-            });
+            })
+        } else {
+            Ok(LookupResult {
+                found: false,
+                region: None,
+            })
         }
-
-        Ok(LookupResult { found: false, region: None })
     }
 }
 

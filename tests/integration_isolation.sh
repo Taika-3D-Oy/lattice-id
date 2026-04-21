@@ -36,61 +36,8 @@ register_user() {
   assert_eq 201 "$status" "register $email"
 }
 
-wait_for_verify_token() {
-  local email="$1"
-  local token=""
-  for _ in {1..30}; do
-    token=$(python3 - "$WASH_LOG" "$email" <<'PY'
-import re
-import sys
-
-log_path = sys.argv[1]
-email = sys.argv[2]
-pattern = re.compile(rf"LID_VERIFY:\s+{re.escape(email)}\s+(\w+)")
-token = ""
-with open(log_path, 'r', encoding='utf-8', errors='ignore') as handle:
-    for line in handle:
-        match = pattern.search(line)
-        if match:
-            token = match.group(1)
-print(token)
-PY
-)
-    if [[ -n "$token" ]]; then
-      echo "$token"
-      return 0
-    fi
-    sleep 1
-  done
-  fail "timed out waiting for verification token for $email"
-}
-
 verify_user_email() {
-  local email="$1"
-  local token
-  token=$(wait_for_verify_token "$email")
-  local body_file="$TMP_DIR/verify-$(echo "$email" | tr '@.' '__').html"
-  local headers_file="$TMP_DIR/verify-$(echo "$email" | tr '@.' '__').headers"
-  local status
-
-  status=$(curl_capture GET "$BASE_URL/verify/email?token=$token" "$body_file" "$headers_file")
-  assert_eq 200 "$status" "verify email $email"
-}
-
-user_id_by_email() {
-  python3 - "$ROOT/dev-data/keyvalue/lid-user-idx" "$1" <<'PY'
-import pathlib
-import sys
-
-bucket = pathlib.Path(sys.argv[1])
-email = sys.argv[2].lower()
-safe_key = f"email:{email}".replace(':', '--').replace('@', '_at_')
-path = bucket / safe_key
-if not path.exists():
-    sys.stderr.write(f"user index entry not found for {email}\n")
-    sys.exit(1)
-print(path.read_text(encoding='utf-8'))
-PY
+  log "Skipping email verification for $1 (cluster mode)"
 }
 
 add_user_to_tenant() {
@@ -190,7 +137,7 @@ assert_forbidden() {
 
 main() {
   log "Starting multi-tenant isolation test..."
-  start_wash_dev
+  wait_for_cluster
 
   local admin_email="admin.$(date +%s)@example.com"
   local admin_password='changeme123'
@@ -211,8 +158,8 @@ main() {
   verify_user_email "$user_b_email"
 
   local user_a_id user_b_id
-  user_a_id=$(user_id_by_email "$user_a_email")
-  user_b_id=$(user_id_by_email "$user_b_email")
+  user_a_id=$(user_id_via_login "$user_a_email" "$user_password")
+  user_b_id=$(user_id_via_login "$user_b_email" "$user_password")
   add_user_to_tenant "$admin_token" "$tenant_a" "$user_a_id" 'manager'
   add_user_to_tenant "$admin_token" "$tenant_b" "$user_b_id" 'manager'
 

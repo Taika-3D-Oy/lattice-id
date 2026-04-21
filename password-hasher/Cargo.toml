@@ -13,4 +13,5 @@ crate-type = ["cdylib"]
 [dependencies]
 wit-bindgen.workspace = true
 argon2 = "0.5"
+password-hash = { version = "0.5", features = ["std"] }
 rand_core = { version = "0.6", features = ["getrandom"] }

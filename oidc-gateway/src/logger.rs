@@ -1,7 +1,7 @@
+use http::{HeaderMap, Method};
 use serde_json::{Map, Value, json};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
-use wstd::http::{HeaderMap, Method};
 
 #[derive(Clone)]
 struct RequestContext {
@@ -75,6 +75,7 @@ pub fn clear_request() {
     }
 }
 
+#[allow(dead_code)]
 pub fn current_trace_id() -> Option<String> {
     request_context()
         .lock()
@@ -190,18 +191,26 @@ mod tests {
     #[test]
     fn parses_valid_traceparent() {
         let trace_id = parse_traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01");
-        assert_eq!(trace_id.as_deref(), Some("4bf92f3577b34da6a3ce929d0e0e4736"));
+        assert_eq!(
+            trace_id.as_deref(),
+            Some("4bf92f3577b34da6a3ce929d0e0e4736")
+        );
     }
 
     #[test]
     fn rejects_invalid_traceparent() {
-        assert!(parse_traceparent("00-00000000000000000000000000000000-00f067aa0ba902b7-01").is_none());
+        assert!(
+            parse_traceparent("00-00000000000000000000000000000000-00f067aa0ba902b7-01").is_none()
+        );
         assert!(parse_traceparent("bogus").is_none());
     }
 
     #[test]
     fn sanitizes_request_id() {
-        assert_eq!(sanitize_request_id("req-123_abc"), Some("req-123_abc".to_string()));
+        assert_eq!(
+            sanitize_request_id("req-123_abc"),
+            Some("req-123_abc".to_string())
+        );
         assert!(sanitize_request_id("bad value").is_none());
     }
 }

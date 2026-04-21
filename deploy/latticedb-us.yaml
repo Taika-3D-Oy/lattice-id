@@ -1,0 +1,31 @@
+apiVersion: runtime.wasmcloud.dev/v1alpha1
+kind: WorkloadDeployment
+metadata:
+  name: lattice-db-us
+  namespace: us
+  annotations:
+    description: lattice-db storage service for US region
+spec:
+  replicas: 1
+  deployPolicy: RollingUpdate
+  template:
+    labels:
+      app.kubernetes.io/name: lattice-db
+      app.kubernetes.io/component: storage
+      lattice-id.dev/region: us
+    spec:
+      hostSelector:
+        hostgroup: us
+      components: []
+      service:
+        image: kind-registry:5000/lattice-db/storage-service:dev
+        maxRestarts: 5
+        localResources:
+          environment:
+            config:
+              NATS_URL: "nats-data.us.svc.cluster.local:4222"
+      hostInterfaces:
+        - namespace: wasi
+          package: sockets
+          interfaces:
+            - tcp

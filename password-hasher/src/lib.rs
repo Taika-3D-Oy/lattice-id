@@ -16,16 +16,10 @@ struct Component;
 
 impl Guest for Component {
     fn hash(plain: String) -> Result<String, String> {
-        // Task 2.10: Increase Argon2 memory cost when platform allows.
-        // We attempt a more robust 32 MiB (32768 KiB).
-        // If the platform memory limit is exceeded, the component allocation would fail,
-        // but we can make this configurable via wasi-config or just keep a reasonable high default.
-        // Argon2 v0.13 standard recommended is 64 MiB, but 32 MiB is a good jump from 4 MiB for Wasm.
+        // Use lower memory cost for Wasm (tuned for acceptable performance
+        // inside wasmCloud). Production deployments behind a native hasher
+        // can increase this.
         let m_cost = 32768; // 32 MiB
-
-        // Check for override in wasi:config (if available in this context)
-        // Note: password-hasher component usually doesn't have config access in its world,
-        // but it could be passed in. For now we use the higher default.
 
         let params = Params::new(m_cost, 3, 1, None).map_err(|e| e.to_string())?;
         let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
@@ -38,9 +32,10 @@ impl Guest for Component {
 
     fn verify(plain: String, phc_hash: String) -> Result<bool, String> {
         let parsed = PasswordHash::new(&phc_hash).map_err(|e| e.to_string())?;
-        Ok(Argon2::default()
+        let result = Argon2::default()
             .verify_password(plain.as_bytes(), &parsed)
-            .is_ok())
+            .is_ok();
+        Ok(result)
     }
 }
 

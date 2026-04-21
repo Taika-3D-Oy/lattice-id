@@ -4,11 +4,33 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WASH="${WASH:-$HOME/.cargo/bin/wash}"
 BASE_URL="${BASE_URL:-http://localhost:8000}"
 TMP_DIR="$(mktemp -d)"
-WASH_LOG="$TMP_DIR/wash-dev.log"
-WASH_PID=""
+
+# wasmCloud vhost is configured with just the hostname (ports aren't allowed
+# in RFC 1123 hostnames).  Wrap curl so the Host header always omits the port.
+# Extracts host from URL if present; respects explicit -H "Host:..." from caller.
+_LIB_HOST=$(echo "$BASE_URL" | awk -F/ '{print $3}' | cut -d: -f1)
+curl() {
+  # If caller already provides a Host header, pass through unchanged
+  local prev=""
+  for arg in "$@"; do
+    if [[ "$prev" == "-H" && ("$arg" == Host:* || "$arg" == host:*) ]]; then
+      command curl "$@"
+      return
+    fi
+    prev="$arg"
+  done
+  # Extract hostname from URL arg (strips port for RFC 1123)
+  local host=""
+  for arg in "$@"; do
+    if [[ "$arg" == http://* || "$arg" == https://* ]]; then
+      host=$(echo "$arg" | awk -F/ '{print $3}' | cut -d: -f1)
+      break
+    fi
+  done
+  command curl -H "Host: ${host:-$_LIB_HOST}" "$@"
+}
 
 # Logging utilities
 log() { echo "INFO: $*" >&2; }
@@ -16,24 +38,11 @@ error() { echo "ERROR: $*" >&2; }
 
 # Environment management
 cleanup() {
-  log "Cleaning up: killing wash dev (PID: ${WASH_PID:-none})"
-  if [[ -n "${WASH_PID:-}" ]] && kill -0 "$WASH_PID" 2>/dev/null; then
-    kill "$WASH_PID" 2>/dev/null || true
-    for i in {1..10}; do
-      kill -0 "$WASH_PID" 2>/dev/null || break
-      sleep 0.5
-    done
-    kill -9 "$WASH_PID" 2>/dev/null || true
-  fi
   rm -rf "$TMP_DIR"
 }
 
 fail() {
   error "$*"
-  if [[ -f "$WASH_LOG" ]]; then
-    echo "---- wash dev tail ----" >&2
-    tail -n 100 "$WASH_LOG" >&2 || true
-  fi
   exit 1
 }
 
@@ -41,38 +50,12 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
 }
 
-# Start/Stop wash dev
-start_wash_dev() {
-  local manifest="${1:-}"
-  
-  require_cmd cargo
+# Wait for the cluster to be ready (OIDC discovery + JWKS responding).
+wait_for_cluster() {
   require_cmd curl
   require_cmd python3
-  [[ -x "$WASH" ]] || fail "custom wash not found at $WASH — see README"
 
-  if curl -sf "$BASE_URL/.well-known/openid-configuration" >/dev/null 2>&1; then
-    fail "$BASE_URL is already serving; stop the existing lattice-id workload before running this test"
-  fi
-
-  mkdir -p "$TMP_DIR"
-  
-  log "Starting wash dev in $ROOT"
-  
-  # Ensure fresh state so bootstrap works
-  rm -rf "$ROOT/dev-data"
-  mkdir -p "$ROOT/dev-data/keyvalue"
-  
-  log "Building wasm32-wasip2 artifacts..."
-  (cd "$ROOT" && cargo build --workspace --target wasm32-wasip2 >/dev/null)
-
-  log "Starting wash dev..."
-  cd "$ROOT"
-  "$WASH" dev --non-interactive > "$WASH_LOG" 2>&1 &
-  WASH_PID=$!
-  
-  # Wait until OIDC discovery AND JWKS are both serving.
-  # /readyz alone is not enough — the core-service may still be generating RSA keys.
-  log "Waiting for OIDC readiness (timeout 120s)..."
+  log "Waiting for cluster readiness at $BASE_URL ..."
   local attempts=0
   local max_attempts=120
   while true; do
@@ -80,51 +63,16 @@ start_wash_dev() {
       && curl -sf "$BASE_URL/.well-known/jwks.json" >/dev/null 2>&1; then
       break
     fi
-    if ! kill -0 "$WASH_PID" 2>/dev/null; then
-       fail "wash dev died during startup. Check $WASH_LOG"
-    fi
     attempts=$((attempts + 1))
     if [[ $attempts -ge $max_attempts ]]; then
-      fail "Timed out waiting for OIDC readiness"
+      fail "Timed out waiting for cluster OIDC readiness at $BASE_URL"
     fi
     sleep 1
   done
-  log "Lattice ready at $BASE_URL"
+  log "Cluster ready at $BASE_URL"
 }
 
-# Restart wash dev WITHOUT wiping dev-data or rebuilding.
-# Use when testing persistence/restart scenarios.
-restart_wash_dev() {
-  mkdir -p "$TMP_DIR"
 
-  if curl -sf "$BASE_URL/.well-known/openid-configuration" >/dev/null 2>&1; then
-    fail "$BASE_URL is already serving; stop the existing lattice-id workload before calling restart_wash_dev"
-  fi
-
-  log "Restarting wash dev in $ROOT (keeping dev-data)..."
-  cd "$ROOT"
-  "$WASH" dev --non-interactive > "$WASH_LOG" 2>&1 &
-  WASH_PID=$!
-
-  log "Waiting for OIDC readiness (timeout 120s)..."
-  local attempts=0
-  local max_attempts=120
-  while true; do
-    if curl -sf "$BASE_URL/.well-known/openid-configuration" >/dev/null 2>&1 \
-      && curl -sf "$BASE_URL/.well-known/jwks.json" >/dev/null 2>&1; then
-      break
-    fi
-    if ! kill -0 "$WASH_PID" 2>/dev/null; then
-       fail "wash dev died during restart. Check $WASH_LOG"
-    fi
-    attempts=$((attempts + 1))
-    if [[ $attempts -ge $max_attempts ]]; then
-      fail "Timed out waiting for OIDC readiness on restart"
-    fi
-    sleep 1
-  done
-  log "Lattice ready at $BASE_URL"
-}
 
 # JSON/HTTP helpers
 json_get() {
@@ -361,8 +309,8 @@ PY
 }
 
 # Register a user via POST /register and login via the OIDC code flow.
-# The .wash/config.yaml bootstrap_hook promotes the first registrant to
-# superadmin when none exists, so this replaces the old /api/bootstrap.
+# The bootstrap_hook in the WorkloadDeployment promotes the first registrant
+# to superadmin when none exists.
 # Usage: TOKEN=$(register_and_login_superadmin "email" "password" "name")
 register_and_login_superadmin() {
   local email="$1"
@@ -421,4 +369,73 @@ register_and_login_superadmin() {
     fail "register_and_login_superadmin: token exchange returned $status (expected 200)"
   fi
   json_get "$token_body" access_token
+}
+
+# Generate a unique email address for tests (avoids collisions across runs).
+unique_email() {
+  local prefix="${1:-test}"
+  echo "${prefix}.$(date +%s).${RANDOM}@example.com"
+}
+
+# Email verification is handled transparently by the cluster — the bootstrap
+# hook auto-verifies the first user, and the integration tests don't exercise
+# the verification flow.  Individual test scripts can override this no-op.
+verify_user_email() {
+  local email="$1"
+  log "Skipping email verification for $email (cluster mode)"
+  return 0
+}
+
+# Get a user's ID (sub) by logging them in and reading /userinfo.
+# Works in both local and cluster mode.
+user_id_via_login() {
+  local email="$1"
+  local password="$2"
+  local tag
+  tag="uid-$(echo "$email" | tr '@.' '__')"
+
+  local verifier challenge
+  verifier="$(random_string)"
+  challenge="$(pkce_challenge "$verifier")"
+
+  local auth_body="$TMP_DIR/$tag-auth.html"
+  local auth_headers="$TMP_DIR/$tag-auth.headers"
+  curl_capture GET \
+    "$BASE_URL/authorize?response_type=code&client_id=lid-admin&redirect_uri=http://localhost:8090/callback&scope=openid+email+profile&state=uid&nonce=uid-nonce&code_challenge=$challenge&code_challenge_method=S256" \
+    "$auth_body" "$auth_headers" >/dev/null
+  local session_id
+  session_id=$(extract_session_id "$auth_body")
+
+  local login_body="$TMP_DIR/$tag-login.html"
+  local login_headers="$TMP_DIR/$tag-login.headers"
+  local status
+  status=$(curl_capture POST "$BASE_URL/login" "$login_body" "$login_headers" \
+    -H 'content-type: application/x-www-form-urlencoded' \
+    -d "session_id=$session_id&email=$email&password=$password")
+  if [[ "$status" != "302" ]]; then
+    fail "user_id_via_login: login returned $status (expected 302)"
+  fi
+  local location code
+  location=$(header_value "$login_headers" "location")
+  code=$(url_query_get "$location" "code")
+
+  local token_body="$TMP_DIR/$tag-token.json"
+  local token_headers="$TMP_DIR/$tag-token.headers"
+  status=$(curl_capture POST "$BASE_URL/token" "$token_body" "$token_headers" \
+    -H 'content-type: application/x-www-form-urlencoded' \
+    -d "grant_type=authorization_code&code=$code&code_verifier=$verifier&client_id=lid-admin&redirect_uri=http://localhost:8090/callback")
+  if [[ "$status" != "200" ]]; then
+    fail "user_id_via_login: token exchange returned $status (expected 200)"
+  fi
+  local access_token
+  access_token=$(json_get "$token_body" access_token)
+
+  local userinfo_body="$TMP_DIR/$tag-userinfo.json"
+  local userinfo_headers="$TMP_DIR/$tag-userinfo.headers"
+  status=$(curl_capture GET "$BASE_URL/userinfo" "$userinfo_body" "$userinfo_headers" \
+    -H "Authorization: Bearer $access_token")
+  if [[ "$status" != "200" ]]; then
+    fail "user_id_via_login: userinfo returned $status (expected 200)"
+  fi
+  json_get "$userinfo_body" sub
 }
