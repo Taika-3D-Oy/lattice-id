@@ -10,8 +10,8 @@
 //!
 //! Available in scripts:
 //!   Variables:  user (map), event (string), tenants (array of maps)
-//!   Functions:  set_superadmin(bool), add_to_tenant(id, role), deny(msg),
-//!               set_claim(key, value), log(msg)
+//!   Functions:  set_superadmin(bool), add_to_tenant(id, role), create_tenant(id, name, display),
+//!               deny(msg), set_claim(key, value), log(msg)
 
 use crate::store::{self, Hook, User};
 use rhai::{AST, Dynamic, Engine, Map, Scope};
@@ -25,6 +25,8 @@ pub struct HookOutcome {
     pub deny_reason: Option<String>,
     /// Whether to set the user as superadmin.
     pub set_superadmin: Option<bool>,
+    /// Tenants to create from the hook: (id, name, display_name).
+    pub create_tenants: Vec<(String, String, String)>,
     /// Tenant memberships to add: (tenant_id, role).
     pub add_to_tenants: Vec<(String, String)>,
     /// Custom claims to inject into tokens.
@@ -38,6 +40,7 @@ pub struct HookOutcome {
 struct HookAccumulator {
     deny_reason: Rc<RefCell<Option<String>>>,
     set_superadmin: Rc<RefCell<Option<bool>>>,
+    create_tenants: Rc<RefCell<Vec<(String, String, String)>>>,
     add_to_tenants: Rc<RefCell<Vec<(String, String)>>>,
     extra_claims: Rc<RefCell<Vec<(String, String)>>>,
     log_messages: Rc<RefCell<Vec<String>>>,
@@ -48,6 +51,7 @@ impl HookAccumulator {
         HookOutcome {
             deny_reason: self.deny_reason.take(),
             set_superadmin: self.set_superadmin.take(),
+            create_tenants: self.create_tenants.take(),
             add_to_tenants: self.add_to_tenants.take(),
             extra_claims: self.extra_claims.take(),
             log_messages: self.log_messages.take(),
@@ -151,6 +155,28 @@ fn create_engine(acc: &HookAccumulator) -> Engine {
     engine.register_fn("log", move |msg: &str| {
         log_ref.borrow_mut().push(msg.to_string());
     });
+
+    let ct_ref = acc.create_tenants.clone();
+    engine.register_fn(
+        "create_tenant",
+        move |id: &str, name: &str, display_name: &str| {
+            // Validate id: lowercase alphanumeric + internal hyphens, 2-63 chars.
+            let id_valid = id.len() >= 2
+                && id.len() <= 63
+                && id
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+                && !id.starts_with('-')
+                && !id.ends_with('-');
+            if id_valid && !name.is_empty() && !display_name.is_empty() {
+                ct_ref.borrow_mut().push((
+                    id.to_string(),
+                    name.to_string(),
+                    display_name.to_string(),
+                ));
+            }
+        },
+    );
 
     engine
 }
@@ -269,6 +295,28 @@ pub async fn apply_outcome(user: &mut User, outcome: &HookOutcome) -> Result<(),
         // Re-read the updated user so the caller has the latest state
         if let Some(updated) = store::get_user(&user.id).await? {
             *user = updated;
+        }
+    }
+
+    for (id, name, display_name) in &outcome.create_tenants {
+        // Idempotent: skip silently if the tenant already exists so that
+        // retries and non-first-registrant invocations don't error out.
+        if store::get_tenant(id).await?.is_none() {
+            let tenant = store::Tenant {
+                id: id.clone(),
+                name: name.clone(),
+                display_name: display_name.clone(),
+                status: "active".to_string(),
+                created_at: store::unix_now(),
+            };
+            store::create_tenant(&tenant).await?;
+            let _ = store::log_audit(
+                "hook_create_tenant",
+                "system",
+                &user.id,
+                &format!("tenant={id} name={name}"),
+            )
+            .await;
         }
     }
 
@@ -661,5 +709,102 @@ mod tests {
         )
         .unwrap();
         assert_eq!(outcome.set_superadmin, Some(true));
+    }
+
+    #[test]
+    fn test_create_tenant_basic() {
+        let outcome = test_hook(
+            r#"create_tenant("acme", "acme", "Acme Inc.");"#,
+            "post-registration",
+        )
+        .unwrap();
+        assert_eq!(outcome.create_tenants.len(), 1);
+        assert_eq!(outcome.create_tenants[0].0, "acme");
+        assert_eq!(outcome.create_tenants[0].1, "acme");
+        assert_eq!(outcome.create_tenants[0].2, "Acme Inc.");
+    }
+
+    #[test]
+    fn test_create_tenant_and_join_in_one_hook() {
+        // The canonical bootstrap pattern: create org + make founder owner
+        let outcome = test_hook(
+            r#"
+            if user.email == "test@example.com" {
+                set_superadmin(true);
+                create_tenant("acme", "acme", "Acme Inc.");
+                add_to_tenant("acme", "owner");
+                log("bootstrap complete");
+            }
+            "#,
+            "post-registration",
+        )
+        .unwrap();
+        assert_eq!(outcome.set_superadmin, Some(true));
+        assert_eq!(outcome.create_tenants.len(), 1);
+        assert_eq!(outcome.create_tenants[0].0, "acme");
+        assert_eq!(outcome.add_to_tenants.len(), 1);
+        assert_eq!(outcome.add_to_tenants[0], ("acme".into(), "owner".into()));
+        assert_eq!(outcome.log_messages, vec!["bootstrap complete"]);
+    }
+
+    #[test]
+    fn test_create_tenant_rejects_id_with_leading_hyphen() {
+        let outcome = test_hook(
+            r#"create_tenant("-bad", "bad", "Bad");"#,
+            "post-registration",
+        )
+        .unwrap();
+        assert!(outcome.create_tenants.is_empty());
+    }
+
+    #[test]
+    fn test_create_tenant_rejects_id_with_trailing_hyphen() {
+        let outcome = test_hook(
+            r#"create_tenant("bad-", "bad", "Bad");"#,
+            "post-registration",
+        )
+        .unwrap();
+        assert!(outcome.create_tenants.is_empty());
+    }
+
+    #[test]
+    fn test_create_tenant_rejects_id_too_short() {
+        let outcome = test_hook(
+            r#"create_tenant("x", "short", "Short");"#,
+            "post-registration",
+        )
+        .unwrap();
+        assert!(outcome.create_tenants.is_empty());
+    }
+
+    #[test]
+    fn test_create_tenant_rejects_uppercase_in_id() {
+        let outcome = test_hook(
+            r#"create_tenant("MyOrg", "MyOrg", "My Org");"#,
+            "post-registration",
+        )
+        .unwrap();
+        assert!(outcome.create_tenants.is_empty());
+    }
+
+    #[test]
+    fn test_create_tenant_rejects_empty_name() {
+        let outcome = test_hook(
+            r#"create_tenant("acme", "", "Acme Inc.");"#,
+            "post-registration",
+        )
+        .unwrap();
+        assert!(outcome.create_tenants.is_empty());
+    }
+
+    #[test]
+    fn test_create_tenant_allows_hyphens_in_id() {
+        let outcome = test_hook(
+            r#"create_tenant("my-org-2", "my-org", "My Org 2");"#,
+            "post-registration",
+        )
+        .unwrap();
+        assert_eq!(outcome.create_tenants.len(), 1);
+        assert_eq!(outcome.create_tenants[0].0, "my-org-2");
     }
 }
