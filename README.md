@@ -177,7 +177,7 @@ bash tests/run_cluster_tests.sh --no-reset
 - Prometheus-format metrics at `/metrics`
 - Embedded admin UI served at `/admin`
 - Multi-region deployment with cross-region user routing
-- Multi-tenant lattice-db support (`ldb_tenant` config)
+- Configurable lattice-db instance isolation (`ldb_instance` config, matches `LDB_INSTANCE` on the storage-service)
 - AWS SES email delivery for production, log provider for development
 
 ## Important Docs

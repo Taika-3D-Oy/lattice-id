@@ -42,36 +42,26 @@ const EC_KEY_NAME: &str = "signing-key-ec-v1";
 const TIMEOUT_MS: u32 = 5000;
 
 fn keys_table() -> String {
-    let prefix = config_store::get("kv_prefix")
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| "lid".to_string());
-    format!("{prefix}-keys")
+    "keys".to_string()
 }
 
-fn ldb_tenant() -> Option<String> {
-    config_store::get("ldb_tenant")
+/// Build a lattice-db NATS subject from the configured instance prefix.
+/// Reads `ldb_instance` config (defaults to `"lid"`).
+fn ldb_subject(op: &str) -> String {
+    let instance = config_store::get("ldb_instance")
         .ok()
         .flatten()
-        .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "lid".to_string());
+    format!("{instance}.{op}")
 }
 
 /// Send a JSON request to lattice-db via wasmcloud:messaging and parse the response.
-/// When `ldb_tenant` config is set, injects `"_partition"` for lattice-db partitioned mode.
 async fn ldb_request(
     subject: &str,
     payload: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    let body = if let Some(tenant) = ldb_tenant() {
-        let mut p = payload.clone();
-        p.as_object_mut()
-            .unwrap()
-            .insert("_partition".to_string(), serde_json::Value::String(tenant));
-        serde_json::to_vec(&p).map_err(|e| format!("serialize: {e}"))?
-    } else {
-        serde_json::to_vec(payload).map_err(|e| format!("serialize: {e}"))?
-    };
+    let body = serde_json::to_vec(payload).map_err(|e| format!("serialize: {e}"))?;
     let resp = consumer::request(subject.to_string(), body, TIMEOUT_MS).await?;
     let val: serde_json::Value =
         serde_json::from_slice(&resp.body).map_err(|e| format!("parse response: {e}"))?;
@@ -84,7 +74,7 @@ async fn ldb_request(
 /// Try to load the signing key from lattice-db.
 async fn load_from_db() -> Result<Option<StoredKey>, String> {
     let payload = serde_json::json!({ "table": keys_table(), "key": KEY_NAME });
-    match ldb_request("ldb.get", &payload).await {
+    match ldb_request(&ldb_subject("get"), &payload).await {
         Ok(resp) => {
             let value_b64 = resp
                 .get("value")
@@ -127,7 +117,7 @@ async fn generate_and_store() -> Result<StoredKey, String> {
     let value_b64 = base64::engine::general_purpose::STANDARD.encode(&stored_bytes);
     let payload = serde_json::json!({ "table": keys_table(), "key": KEY_NAME, "value": value_b64 });
 
-    match ldb_request("ldb.create", &payload).await {
+    match ldb_request(&ldb_subject("create"), &payload).await {
         Ok(_) => {
             eprintln!("KEY-MANAGER: generated and stored new signing key kid={kid}");
             Ok(stored)
@@ -339,7 +329,7 @@ impl StoredEcKey {
 
 async fn load_ec_from_db() -> Result<Option<StoredEcKey>, String> {
     let payload = serde_json::json!({ "table": keys_table(), "key": EC_KEY_NAME });
-    match ldb_request("ldb.get", &payload).await {
+    match ldb_request(&ldb_subject("get"), &payload).await {
         Ok(resp) => {
             let value_b64 = resp
                 .get("value")
@@ -380,7 +370,7 @@ async fn generate_and_store_ec() -> Result<StoredEcKey, String> {
     let payload =
         serde_json::json!({ "table": keys_table(), "key": EC_KEY_NAME, "value": value_b64 });
 
-    match ldb_request("ldb.create", &payload).await {
+    match ldb_request(&ldb_subject("create"), &payload).await {
         Ok(_) => {
             eprintln!("KEY-MANAGER: generated and stored new EC signing key kid={kid}");
             Ok(stored)

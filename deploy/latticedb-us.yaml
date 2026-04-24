@@ -24,6 +24,7 @@ spec:
           environment:
             config:
               NATS_URL: "nats-data.us.svc.cluster.local:4222"
+              LDB_INSTANCE: "lid"
       hostInterfaces:
         - namespace: wasi
           package: sockets

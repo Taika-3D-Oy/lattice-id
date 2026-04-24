@@ -90,34 +90,25 @@ thread_local! {
 // ── KV helpers (same NATS messaging pattern as key-manager) ──
 
 fn vault_table() -> String {
-    let prefix = config_store::get("kv_prefix")
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| "lid".to_string());
-    format!("{prefix}-vault")
+    "vault".to_string()
 }
 
-fn ldb_tenant() -> Option<String> {
-    config_store::get("ldb_tenant")
+/// Build a lattice-db NATS subject from the configured instance prefix.
+/// Reads `ldb_instance` config (defaults to `"lid"`).
+fn ldb_subject(op: &str) -> String {
+    let instance = config_store::get("ldb_instance")
         .ok()
         .flatten()
-        .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "lid".to_string());
+    format!("{instance}.{op}")
 }
 
 async fn ldb_request(
     subject: &str,
     payload: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    let body = if let Some(tenant) = ldb_tenant() {
-        let mut p = payload.clone();
-        p.as_object_mut()
-            .unwrap()
-            .insert("_partition".to_string(), serde_json::json!(tenant));
-        serde_json::to_vec(&p).map_err(|e| format!("serialize: {e}"))?
-    } else {
-        serde_json::to_vec(payload).map_err(|e| format!("serialize: {e}"))?
-    };
+    let body = serde_json::to_vec(payload).map_err(|e| format!("serialize: {e}"))?;
     let resp = consumer::request(subject.to_string(), body, TIMEOUT_MS).await?;
     let val: serde_json::Value =
         serde_json::from_slice(&resp.body).map_err(|e| format!("parse: {e}"))?;
@@ -130,7 +121,7 @@ async fn ldb_request(
 /// Read raw bytes from a KV bucket (returns None when the key doesn't exist).
 async fn kv_get_raw(table: &str, key: &str) -> Result<Option<Vec<u8>>, String> {
     let payload = serde_json::json!({ "table": table, "key": key });
-    match ldb_request("ldb.get", &payload).await {
+    match ldb_request(&ldb_subject("get"), &payload).await {
         Ok(resp) => {
             let b64 = resp
                 .get("value")
@@ -148,7 +139,7 @@ async fn kv_get_raw(table: &str, key: &str) -> Result<Option<Vec<u8>>, String> {
 async fn kv_set_raw(table: &str, key: &str, value: &[u8]) -> Result<(), String> {
     let encoded = B64.encode(value);
     let payload = serde_json::json!({ "table": table, "key": key, "value": encoded });
-    ldb_request("ldb.set", &payload).await?;
+    ldb_request(&ldb_subject("set"), &payload).await?;
     Ok(())
 }
 
@@ -222,7 +213,7 @@ async fn load_master_key(version: u32) -> Result<[u8; 32], VaultError> {
         "body": serde_json::json!({ "ciphertext": format!("vault:v1:{ciphertext_b64}") }).to_string()
     });
 
-    let resp = ldb_request("lid.kms.request", &req_payload)
+    let resp = ldb_request(&ldb_subject("kms.request"), &req_payload)
         .await
         .map_err(VaultError::KmsUnavailable)?;
 
@@ -422,7 +413,7 @@ impl Guest for CryptoVault {
                 "body": serde_json::json!({ "plaintext": new_key_b64 }).to_string()
             });
 
-            let resp = ldb_request("lid.kms.request", &req_payload)
+            let resp = ldb_request(&ldb_subject("kms.request"), &req_payload)
                 .await
                 .map_err(VaultError::KmsUnavailable)?;
 

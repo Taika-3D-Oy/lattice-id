@@ -53,7 +53,7 @@ EU_HOSTNAME="eu.lid.internal"
 US_HOSTNAME="us.lid.internal"
 
 # lattice-db image source (override if you want a pinned version)
-LATTICE_DB_IMAGE="${LATTICE_DB_IMAGE:-ghcr.io/taika-3d-oy/lattice-db/storage-service:latest}"
+LATTICE_DB_IMAGE="${LATTICE_DB_IMAGE:-ghcr.io/taika-3d-oy/lattice-db/storage-service:v1.2.0}"
 
 log() { echo "==> $*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -194,7 +194,8 @@ doc = {
                     "localResources": {
                         "environment": {
                             "config": {
-                                "NATS_URL": nats_ip + ":4222"
+                                "NATS_URL": nats_ip + ":4222",
+                                "LDB_INSTANCE": "lid"
                             }
                         }
                     }

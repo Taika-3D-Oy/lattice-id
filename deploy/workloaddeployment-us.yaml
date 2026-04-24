@@ -24,7 +24,6 @@ spec:
             environment:
               config:
                 issuer_url: http://us.lid.internal:8001
-                kv_prefix: us
         - name: password-hasher
           image: kind-registry:5000/lattice-id/password-hasher:dev
           maxInvocations: 8
@@ -43,11 +42,6 @@ spec:
         - name: crypto-vault
           image: kind-registry:5000/lattice-id/crypto-vault:dev
           maxInvocations: 100
-          localResources:
-            environment:
-              config:
-                kv_prefix: us
-                ldb_tenant: "lattice-id"
         - name: admin-ui-host
           image: kind-registry:5000/lattice-id/admin-ui-host:dev
           maxInvocations: 100
@@ -64,16 +58,15 @@ spec:
             - store
           config:
             # Dev-only two-region manifest. Keep the same shared secret in both regions.
-            ldb_tenant: "lattice-id"
             internal_auth_secret: "local-two-region-dev-secret"
+            ldb_instance: "lid"
             dev_mode: "true"
             require_email_verification: "false"
             allow_registration: "true"
             email_provider: "log"
             region_id: "us"
-            kv_prefix: "us"
-            tenant_bucket: "lid-tenants"
-            client_bucket: "lid-clients"
+            tenant_bucket: "tenants"
+            client_bucket: "clients"
             region_domains: '{"eu":"http://eu.lid.internal:8000","us":"http://us.lid.internal:8001"}'
             region_internal_urls: '{"eu":"__EU_URL__","us":"__US_URL__"}'
             bootstrap_hook: |

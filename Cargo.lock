@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "abuse-protection"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "base64 0.21.7",
  "serde_json",
@@ -260,7 +260,7 @@ dependencies = [
 
 [[package]]
 name = "crypto-vault"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -339,7 +339,7 @@ dependencies = [
 
 [[package]]
 name = "email-worker"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -622,7 +622,7 @@ dependencies = [
 
 [[package]]
 name = "key-manager"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "base64 0.21.7",
  "getrandom",
@@ -723,7 +723,7 @@ dependencies = [
 
 [[package]]
 name = "oidc-gateway"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -785,7 +785,7 @@ dependencies = [
 
 [[package]]
 name = "password-hasher"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "argon2",
  "password-hash",
@@ -924,7 +924,7 @@ dependencies = [
 
 [[package]]
 name = "region-authority"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "base64 0.21.7",
  "serde_json",

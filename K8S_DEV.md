@@ -45,11 +45,11 @@ Pushing the wrong filename (e.g. a stale 13KB artifact) produces a cryptic "Serv
 
 All persistent state is stored via [lattice-db](https://crates.io/crates/lattice-db-client), a separate wasmCloud workload that provides NATS KV with CAS semantics over NATS request/reply messaging.
 
-Components use `wasmcloud:messaging/consumer` to send requests to lattice-db, which subscribes to `ldb.>` subjects. lattice-db is backed by NATS JetStream KV.
+Components use `wasmcloud:messaging/consumer` to send requests to lattice-db, which subscribes to `lid.>` subjects. lattice-db is backed by NATS JetStream KV.
 
 ### KV bucket naming
 
-Buckets are created by lattice-db on first access. Table names correspond to KV bucket names: `lid-users`, `lid-user-idx`, `lid-sessions`, `lid-clients`, `lid-tenants`, `lid-memberships`, `lid-audit`, `lid-keys`, `lid-abuse-rate-limits`.
+Buckets are created by lattice-db on first access. Table names correspond to KV bucket names: `lid-users`, `lid-user-idx`, `lid-sessions`, `lid-clients`, `lid-tenants`, `lid-memberships`, `lid-audit`, `lid-keys`, `lid-abuse-rate-limits`, `lid-vault`. The `lid-` prefix comes from `LDB_INSTANCE=lid` set on the storage-service deployment.
 
 ### Service components and wasi:cli/run
 

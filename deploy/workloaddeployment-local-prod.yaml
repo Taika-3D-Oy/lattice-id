@@ -42,8 +42,7 @@ spec:
           localResources:
             environment:
               config:
-                kv_prefix: lid
-                ldb_tenant: "lattice-id"
+                kms_dev_seed: "lattice-id-local-dev-seed-change-before-production"
         - name: admin-ui-host
           image: kind-registry:5000/lattice-id/admin-ui-host:dev
           maxInvocations: 100
@@ -63,8 +62,8 @@ spec:
           interfaces:
             - store
           config:
-            ldb_tenant: "lattice-id"
             internal_auth_secret: "__INTERNAL_AUTH_SECRET__"
+            ldb_instance: "lid"
             dev_mode: "true"
             require_email_verification: "true"
             allow_registration: "false"

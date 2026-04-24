@@ -22,36 +22,26 @@ struct AbuseProtection;
 const TIMEOUT_MS: u32 = 5000;
 
 fn rate_limits_table() -> String {
-    let prefix = config_store::get("kv_prefix")
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| "lid".to_string());
-    format!("{prefix}-abuse-rate-limits")
+    "abuse-rate-limits".to_string()
 }
 
-fn ldb_tenant() -> Option<String> {
-    config_store::get("ldb_tenant")
+/// Build a lattice-db NATS subject from the configured instance prefix.
+/// Reads `ldb_instance` config (defaults to `"lid"`).
+fn ldb_subject(op: &str) -> String {
+    let instance = config_store::get("ldb_instance")
         .ok()
         .flatten()
-        .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "lid".to_string());
+    format!("{instance}.{op}")
 }
 
 /// Send a JSON request to lattice-db via wasmcloud:messaging and parse the response.
-/// When `ldb_tenant` config is set, injects `"_partition"` for lattice-db partitioned mode.
 async fn ldb_request(
     subject: &str,
     payload: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    let body = if let Some(tenant) = ldb_tenant() {
-        let mut p = payload.clone();
-        p.as_object_mut()
-            .unwrap()
-            .insert("_partition".to_string(), serde_json::Value::String(tenant));
-        serde_json::to_vec(&p).map_err(|e| format!("serialize: {e}"))?
-    } else {
-        serde_json::to_vec(payload).map_err(|e| format!("serialize: {e}"))?
-    };
+    let body = serde_json::to_vec(payload).map_err(|e| format!("serialize: {e}"))?;
     let resp = consumer::request(subject.to_string(), body, TIMEOUT_MS).await?;
     let val: serde_json::Value =
         serde_json::from_slice(&resp.body).map_err(|e| format!("parse response: {e}"))?;
@@ -79,7 +69,7 @@ impl Guest for AbuseProtection {
         for _attempt in 0..MAX_RETRIES {
             // Read current counter with revision
             let payload = serde_json::json!({ "table": table, "key": db_key });
-            let (count, revision) = match ldb_request("ldb.get", &payload).await {
+            let (count, revision) = match ldb_request(&ldb_subject("get"), &payload).await {
                 Ok(resp) => {
                     let value_b64 = resp.get("value").and_then(|v| v.as_str()).unwrap_or("MA==");
                     let bytes = base64::engine::general_purpose::STANDARD
@@ -110,7 +100,7 @@ impl Guest for AbuseProtection {
                     "value": new_value,
                     "ttl_seconds": window_secs + 10,
                 });
-                match ldb_request("ldb.create", &payload).await {
+                match ldb_request(&ldb_subject("create"), &payload).await {
                     Ok(_) => return Ok((true, limit - count - 1)),
                     Err(e) if e.contains("already exists") => {
                         continue; // retry — re-read the real count and CAS
@@ -125,7 +115,7 @@ impl Guest for AbuseProtection {
                     "value": new_value,
                     "revision": revision,
                 });
-                match ldb_request("ldb.cas", &payload).await {
+                match ldb_request(&ldb_subject("cas"), &payload).await {
                     Ok(_) => return Ok((true, limit - count - 1)),
                     Err(e) if e.contains("revision mismatch") => {
                         continue; // retry with fresh revision

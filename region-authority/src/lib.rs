@@ -18,36 +18,29 @@ use bindings::wasmcloud::messaging::consumer;
 struct RegionAuthority;
 
 fn user_idx_table() -> String {
-    let prefix = config_store::get("kv_prefix")
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| "lid".to_string());
-    format!("{prefix}-user-idx")
+    "user-idx".to_string()
 }
 
-fn ldb_tenant() -> Option<String> {
-    config_store::get("ldb_tenant")
+/// Build a lattice-db NATS subject from the configured instance prefix.
+/// Reads `ldb_instance` config (defaults to `"lid"`).
+fn ldb_subject(op: &str) -> String {
+    let instance = config_store::get("ldb_instance")
         .ok()
         .flatten()
-        .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "lid".to_string());
+    format!("{instance}.{op}")
 }
 
 /// Check lattice-db for the email index entry.
 async fn email_exists_in_db(email_hash: &str) -> bool {
     let key = format!("email:{email_hash}");
-    let mut payload = serde_json::json!({
+    let payload = serde_json::json!({
         "table": user_idx_table(),
         "key": key,
     });
-    if let Some(tenant) = ldb_tenant() {
-        payload
-            .as_object_mut()
-            .unwrap()
-            .insert("_partition".to_string(), serde_json::Value::String(tenant));
-    }
     let body = serde_json::to_vec(&payload).unwrap_or_default();
-    match consumer::request("ldb.exists".to_string(), body, 2000).await {
+    match consumer::request(ldb_subject("exists"), body, 2000).await {
         Ok(msg) => {
             if let Ok(resp) = serde_json::from_slice::<serde_json::Value>(&msg.body) {
                 resp.get("exists")
