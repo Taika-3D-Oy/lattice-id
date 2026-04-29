@@ -606,21 +606,22 @@ async fn ldb_request(
     payload: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     // Inject consistency context when the payload targets a specific table.
-    let payload = if let Some(table) = payload.get("table").and_then(|t| t.as_str()) {
-        let min_rev = SESSION_REVISIONS.with(|sr| sr.borrow().get(table).copied());
-        if let Some(rev) = min_rev {
-            let mut p = payload.clone();
-            p.as_object_mut().unwrap().insert(
-                "consistency".to_string(),
-                serde_json::json!({ "min_revision": rev }),
-            );
-            p
+    let (payload, has_consistency) =
+        if let Some(table) = payload.get("table").and_then(|t| t.as_str()) {
+            let min_rev = SESSION_REVISIONS.with(|sr| sr.borrow().get(table).copied());
+            if let Some(rev) = min_rev {
+                let mut p = payload.clone();
+                p.as_object_mut().unwrap().insert(
+                    "consistency".to_string(),
+                    serde_json::json!({ "min_revision": rev }),
+                );
+                (p, true)
+            } else {
+                (payload.clone(), false)
+            }
         } else {
-            payload.clone()
-        }
-    } else {
-        payload.clone()
-    };
+            (payload.clone(), false)
+        };
 
     let body = serde_json::to_vec(&payload).map_err(|e| format!("serialize: {e}"))?;
     let resp = crate::bindings::wasmcloud::messaging::consumer::request(
@@ -632,6 +633,25 @@ async fn ldb_request(
     let val: serde_json::Value =
         serde_json::from_slice(&resp.body).map_err(|e| format!("parse response: {e}"))?;
     if let Some(err) = val.get("error").and_then(|v| v.as_str()) {
+        // If the replica couldn't catch up to the requested revision, retry
+        // without the consistency constraint rather than failing the request.
+        if has_consistency && err.contains("stale replica") {
+            let mut fallback = payload.clone();
+            fallback.as_object_mut().unwrap().remove("consistency");
+            let fb_body = serde_json::to_vec(&fallback).map_err(|e| format!("serialize: {e}"))?;
+            let fb_resp = crate::bindings::wasmcloud::messaging::consumer::request(
+                subject.to_string(),
+                fb_body,
+                LDB_TIMEOUT_MS,
+            )
+            .await?;
+            let fb_val: serde_json::Value = serde_json::from_slice(&fb_resp.body)
+                .map_err(|e| format!("parse response: {e}"))?;
+            if let Some(fb_err) = fb_val.get("error").and_then(|v| v.as_str()) {
+                return Err(fb_err.to_string());
+            }
+            return Ok(fb_val);
+        }
         return Err(err.to_string());
     }
 

@@ -26,7 +26,7 @@ REGISTRY_PORT=5001
 HELM_VERSION="2.0.1"
 
 # lattice-db image source (override if you want a pinned version)
-LATTICE_DB_IMAGE="${LATTICE_DB_IMAGE:-ghcr.io/taika-3d-oy/lattice-db/storage-service:v1.6.0}"
+LATTICE_DB_IMAGE="${LATTICE_DB_IMAGE:-ghcr.io/taika-3d-oy/lattice-db/storage-service:v1.6.1}"
 
 log() { echo "==> $*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
