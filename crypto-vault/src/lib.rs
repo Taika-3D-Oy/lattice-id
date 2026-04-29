@@ -104,17 +104,68 @@ fn ldb_subject(op: &str) -> String {
     format!("{instance}.{op}")
 }
 
+use std::collections::HashMap;
+
+thread_local! {
+    static SESSION_REVISIONS: RefCell<HashMap<String, u64>> = RefCell::new(HashMap::new());
+}
+
 async fn ldb_request(
     subject: &str,
     payload: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    let body = serde_json::to_vec(payload).map_err(|e| format!("serialize: {e}"))?;
+    let payload = if let Some(table) = payload.get("table").and_then(|t| t.as_str()) {
+        let min_rev = SESSION_REVISIONS.with(|sr| sr.borrow().get(table).copied());
+        if let Some(rev) = min_rev {
+            let mut p = payload.clone();
+            p.as_object_mut().unwrap().insert(
+                "consistency".to_string(),
+                serde_json::json!({ "min_revision": rev }),
+            );
+            p
+        } else {
+            payload.clone()
+        }
+    } else {
+        payload.clone()
+    };
+
+    let body = serde_json::to_vec(&payload).map_err(|e| format!("serialize: {e}"))?;
     let resp = consumer::request(subject.to_string(), body, TIMEOUT_MS).await?;
     let val: serde_json::Value =
         serde_json::from_slice(&resp.body).map_err(|e| format!("parse: {e}"))?;
     if let Some(err) = val.get("error").and_then(|v| v.as_str()) {
         return Err(err.to_string());
     }
+
+    if let Some(session) = val.get("session").and_then(|s| s.as_object())
+        && let Some(revisions) = session.get("revisions").and_then(|r| r.as_object())
+    {
+        SESSION_REVISIONS.with(|sr| {
+            let mut map = sr.borrow_mut();
+            for (table, rev_val) in revisions {
+                if let Some(rev) = rev_val.as_u64() {
+                    let entry = map.entry(table.clone()).or_insert(0);
+                    if rev > *entry {
+                        *entry = rev;
+                    }
+                }
+            }
+        });
+    }
+    if let (Some(table), Some(revision)) = (
+        payload.get("table").and_then(|t| t.as_str()),
+        val.get("revision").and_then(|v| v.as_u64()),
+    ) {
+        SESSION_REVISIONS.with(|sr| {
+            let mut map = sr.borrow_mut();
+            let entry = map.entry(table.to_string()).or_insert(0);
+            if revision > *entry {
+                *entry = revision;
+            }
+        });
+    }
+
     Ok(val)
 }
 
@@ -139,7 +190,7 @@ async fn kv_get_raw(table: &str, key: &str) -> Result<Option<Vec<u8>>, String> {
 async fn kv_set_raw(table: &str, key: &str, value: &[u8]) -> Result<(), String> {
     let encoded = B64.encode(value);
     let payload = serde_json::json!({ "table": table, "key": key, "value": encoded });
-    ldb_request(&ldb_subject("set"), &payload).await?;
+    ldb_request(&ldb_subject("put"), &payload).await?;
     Ok(())
 }
 

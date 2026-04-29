@@ -12,7 +12,7 @@ All deployment files exist solely for testing and validating Lattice-ID locally.
 
 ## Status
 
-**v1.2.1**
+**v1.3.0**
 
 - Full OIDC/OAuth2 compliance (authorization code + PKCE, client credentials, device flow, refresh token rotation)
 - Security hardening: CSRF protection, refresh token absolute lifetime cap, account lockout, rate limiting, consent screen
@@ -182,6 +182,7 @@ bash tests/run_cluster_tests.sh --no-reset
 - Embedded admin UI served at `/admin`
 - Multi-region deployment with cross-region user routing
 - Configurable lattice-db instance isolation (`ldb_instance` config, matches `LDB_INSTANCE` on the storage-service)
+- Session consistency tokens (lattice-db 1.6.0) — read-your-write guarantees across replicas via `x-lid-consistency` header and `__lid_cr` HttpOnly cookie
 - AWS SES email delivery for production, log provider for development
 
 ## Important Docs

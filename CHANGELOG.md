@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-04-29
+
+### Added
+
+- **Session consistency tokens (lattice-db 1.6.0)** — all five components now
+  track per-table revision watermarks within each request. Read operations
+  inject `consistency.min_revision` and write responses update the map from
+  `session.revisions`. This provides read-your-write guarantees even when NATS
+  queue groups route successive requests to different lattice-db replicas.
+
+- **Consistency propagation for browsers and API clients** — the oidc-gateway
+  emits an `x-lid-consistency` response header and a `__lid_cr` HttpOnly cookie
+  containing session revisions JSON. Inbound requests seed the consistency
+  context from the header (preferred, for API clients) or cookie (automatic for
+  browsers). Backward compatible: missing context falls back to eventual reads.
+
+- **CORS headers updated** — `x-lid-consistency` added to
+  `access-control-allow-headers` and `access-control-expose-headers`.
+
+- **New integration test** `tests/integration_consistency.sh` — verifies
+  header/cookie emission, round-trip, and backward compatibility.
+
+### Changed
+
+- **Deploy scripts pin lattice-db to `v1.6.0`** — `LATTICE_DB_IMAGE` default
+  updated from `:v1.5.0` to `:v1.6.0` in `deploy-local.sh` and
+  `deploy-two-region.sh`.
+
+- **lattice-db workload manifests** — added `LDB_CONSISTENCY_WATCHER_WAIT_STEPS`
+  and `LDB_CONSISTENCY_WATCHER_WAIT_STEP_SECS` environment variables (defaults:
+  `2` and `1`) to `latticedb-eu.yaml`, `latticedb-us.yaml`, `deploy-local.sh`,
+  and `deploy-two-region.sh`.
+
+### Fixed
+
+- **crypto-vault** — `ldb.set` corrected to `ldb.put` to match the documented
+  lattice-db protocol.
+
 ## [1.2.1] - 2026-04-29
 
 ### Fixed

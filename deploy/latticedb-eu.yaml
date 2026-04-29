@@ -25,6 +25,8 @@ spec:
             config:
               NATS_URL: "nats-data.eu.svc.cluster.local:4222"
               LDB_INSTANCE: "lid"
+              LDB_CONSISTENCY_WATCHER_WAIT_STEPS: "2"
+              LDB_CONSISTENCY_WATCHER_WAIT_STEP_SECS: "1"
       hostInterfaces:
         - namespace: wasi
           package: sockets

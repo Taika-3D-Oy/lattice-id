@@ -15,7 +15,14 @@ use bindings::exports::taika3d::lid::authority::{Guest, LookupResult};
 use bindings::wasi::config::store as config_store;
 use bindings::wasmcloud::messaging::consumer;
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 struct RegionAuthority;
+
+thread_local! {
+    static SESSION_REVISIONS: RefCell<HashMap<String, u64>> = RefCell::new(HashMap::new());
+}
 
 fn user_idx_table() -> String {
     "user-idx".to_string()
@@ -35,10 +42,19 @@ fn ldb_subject(op: &str) -> String {
 /// Check lattice-db for the email index entry.
 async fn email_exists_in_db(email_hash: &str) -> bool {
     let key = format!("email:{email_hash}");
-    let payload = serde_json::json!({
-        "table": user_idx_table(),
+    let table = user_idx_table();
+    let mut payload = serde_json::json!({
+        "table": table,
         "key": key,
     });
+    // Inject consistency context if available.
+    let min_rev = SESSION_REVISIONS.with(|sr| sr.borrow().get(&table).copied());
+    if let Some(rev) = min_rev {
+        payload.as_object_mut().unwrap().insert(
+            "consistency".to_string(),
+            serde_json::json!({ "min_revision": rev }),
+        );
+    }
     let body = serde_json::to_vec(&payload).unwrap_or_default();
     match consumer::request(ldb_subject("exists"), body, 2000).await {
         Ok(msg) => {

@@ -110,6 +110,28 @@ async fn handle_request(
     // Load config values (cached for this request)
     store::init_config().await;
 
+    // ── Session consistency: seed from inbound header or cookie ──
+    // Header `x-lid-consistency` takes priority (API clients).
+    // Cookie `__lid_cr` is the browser fallback (auto round-tripped).
+    let inbound_revisions = req
+        .headers()
+        .get("x-lid-consistency")
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| {
+            req.headers()
+                .get_all("cookie")
+                .iter()
+                .filter_map(|v| v.to_str().ok())
+                .flat_map(|s| s.split(';'))
+                .map(|c| c.trim())
+                .find(|c| c.starts_with("__lid_cr="))
+                .and_then(|c| c.strip_prefix("__lid_cr="))
+        })
+        .and_then(|raw| serde_json::from_str::<std::collections::HashMap<String, u64>>(raw).ok());
+    if let Some(revisions) = inbound_revisions {
+        store::seed_session_revisions(revisions);
+    }
+
     let req_origin = req
         .headers()
         .get("origin")
@@ -143,6 +165,32 @@ async fn handle_request(
 
     // Add CORS and security headers to every response
     let resp = with_cors_and_security(resp, req_origin.as_deref(), &trace_id, &req_path).await;
+
+    // ── Session consistency: emit updated revisions ──
+    let resp = {
+        let revisions = store::get_session_revisions();
+        if !revisions.is_empty() {
+            let (mut parts, body) = resp.into_parts();
+            if let Ok(json) = serde_json::to_string(&revisions) {
+                // Header for API clients
+                if let Ok(val) = json.parse() {
+                    parts.headers.insert("x-lid-consistency", val);
+                }
+                // HttpOnly cookie for browsers (SameSite=Lax, path=/, 24h max-age)
+                let cookie = format!(
+                    "__lid_cr={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400",
+                    json,
+                );
+                if let Ok(val) = cookie.parse() {
+                    parts.headers.append("set-cookie", val);
+                }
+            }
+            Response::from_parts(parts, body)
+        } else {
+            resp
+        }
+    };
+
     logger::clear_request();
     Ok(resp)
 }
@@ -1312,13 +1360,13 @@ async fn with_cors_and_security(
     );
     parts.headers.insert(
         "access-control-allow-headers",
-        "authorization, content-type, traceparent, x-request-id"
+        "authorization, content-type, traceparent, x-request-id, x-lid-consistency"
             .parse()
             .unwrap(),
     );
     parts.headers.insert(
         "access-control-expose-headers",
-        "x-request-id".parse().unwrap(),
+        "x-request-id, x-lid-consistency".parse().unwrap(),
     );
     parts
         .headers

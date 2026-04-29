@@ -1,10 +1,37 @@
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // Cached config values (initialized once per request via init_config)
 thread_local! {
     static CONFIG_CACHE: RefCell<Option<OidcConfigCache>> = const { RefCell::new(None) };
+}
+
+// ── Session consistency tracking (lattice-db 1.6.0) ─────────────────────────
+// Tracks per-table revision watermarks within a single request lifetime.
+// Reads inject `consistency.min_revision`; write responses update the map
+// from `session.revisions`.
+thread_local! {
+    static SESSION_REVISIONS: RefCell<HashMap<String, u64>> = RefCell::new(HashMap::new());
+}
+
+/// Seed session revisions from an external source (e.g. inbound consistency cookie/header).
+pub fn seed_session_revisions(revisions: HashMap<String, u64>) {
+    SESSION_REVISIONS.with(|sr| {
+        let mut map = sr.borrow_mut();
+        for (table, rev) in revisions {
+            let entry = map.entry(table).or_insert(0);
+            if rev > *entry {
+                *entry = rev;
+            }
+        }
+    });
+}
+
+/// Export current session revisions so the gateway can propagate them to the caller.
+pub fn get_session_revisions() -> HashMap<String, u64> {
+    SESSION_REVISIONS.with(|sr| sr.borrow().clone())
 }
 
 struct OidcConfigCache {
@@ -572,11 +599,30 @@ fn ldb_subject(op: &str) -> String {
 }
 
 /// Send a JSON request to lattice-db via the host's NATS connection.
+/// Automatically injects `consistency.min_revision` for table-scoped reads
+/// and extracts `session.revisions` from responses (lattice-db ≥ 1.6.0).
 async fn ldb_request(
     subject: &str,
     payload: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    let body = serde_json::to_vec(payload).map_err(|e| format!("serialize: {e}"))?;
+    // Inject consistency context when the payload targets a specific table.
+    let payload = if let Some(table) = payload.get("table").and_then(|t| t.as_str()) {
+        let min_rev = SESSION_REVISIONS.with(|sr| sr.borrow().get(table).copied());
+        if let Some(rev) = min_rev {
+            let mut p = payload.clone();
+            p.as_object_mut().unwrap().insert(
+                "consistency".to_string(),
+                serde_json::json!({ "min_revision": rev }),
+            );
+            p
+        } else {
+            payload.clone()
+        }
+    } else {
+        payload.clone()
+    };
+
+    let body = serde_json::to_vec(&payload).map_err(|e| format!("serialize: {e}"))?;
     let resp = crate::bindings::wasmcloud::messaging::consumer::request(
         subject.to_string(),
         body,
@@ -588,6 +634,38 @@ async fn ldb_request(
     if let Some(err) = val.get("error").and_then(|v| v.as_str()) {
         return Err(err.to_string());
     }
+
+    // Merge session revisions from the response (lattice-db 1.6.0+).
+    if let Some(session) = val.get("session").and_then(|s| s.as_object())
+        && let Some(revisions) = session.get("revisions").and_then(|r| r.as_object())
+    {
+        SESSION_REVISIONS.with(|sr| {
+            let mut map = sr.borrow_mut();
+            for (table, rev_val) in revisions {
+                if let Some(rev) = rev_val.as_u64() {
+                    let entry = map.entry(table.clone()).or_insert(0);
+                    if rev > *entry {
+                        *entry = rev;
+                    }
+                }
+            }
+        });
+    }
+
+    // Backward-compatible fallback: infer from single-table write responses.
+    if let (Some(table), Some(revision)) = (
+        payload.get("table").and_then(|t| t.as_str()),
+        val.get("revision").and_then(|v| v.as_u64()),
+    ) {
+        SESSION_REVISIONS.with(|sr| {
+            let mut map = sr.borrow_mut();
+            let entry = map.entry(table.to_string()).or_insert(0);
+            if revision > *entry {
+                *entry = revision;
+            }
+        });
+    }
+
     Ok(val)
 }
 
