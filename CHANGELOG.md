@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-04-29
+
+### Fixed
+
+- **Bootstrap now creates the `lid-admin` OAuth client** — when the first
+  superadmin is promoted via the bootstrap hook, the gateway ensures the
+  `lid-admin` client exists so the admin UI can log in immediately. Previously
+  the client was only created lazily in dev mode, which meant production
+  deployments required an extra request before the admin UI worked.
+
+### Removed
+
+- `kv_prefix` config key from `workloaddeployment-local-prod.yaml` — this
+  leftover key was removed for consistency with the 1.2.0 migration.
+
 ## [1.2.0] - 2026-04-23
 
 ### Changed
@@ -76,6 +91,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Abuse-protection and rate-limiting component.
 - Crypto-vault component for key management.
 
+[1.2.1]: https://github.com/Taika-3D-Oy/lattice-id/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/Taika-3D-Oy/lattice-id/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/Taika-3D-Oy/lattice-id/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/Taika-3D-Oy/lattice-id/releases/tag/v1.0.0

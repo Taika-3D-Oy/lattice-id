@@ -755,6 +755,17 @@ async fn handle_register(body_bytes: &[u8]) -> Result<Response<String>, String> 
                 logger::error_message("bootstrap_hook.apply_failed", e);
             }
 
+            // When bootstrap promotes the first superadmin, ensure the
+            // lid-admin OAuth client exists so the admin UI can log in.
+            // In dev mode this is handled per-request, but production
+            // deployments only reach here once during initial bootstrap.
+            if boot.set_superadmin == Some(true) {
+                let issuer = get_issuer();
+                if let Err(e) = store::ensure_admin_client(&issuer, false).await {
+                    logger::error_message("bootstrap.ensure_admin_client_failed", e);
+                }
+            }
+
             // Execute post-registration hooks (Rhai scripting)
             let outcome = hooks::execute_hooks("post-registration", &user_mut).await;
             if let Some(reason) = &outcome.deny_reason {

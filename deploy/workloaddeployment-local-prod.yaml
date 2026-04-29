@@ -20,7 +20,6 @@ spec:
             environment:
               config:
                 issuer_url: http://localhost:8000
-                kv_prefix: lid
         - name: password-hasher
           image: kind-registry:5000/lattice-id/password-hasher:dev
           maxInvocations: 8

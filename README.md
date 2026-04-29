@@ -12,7 +12,7 @@ All deployment files exist solely for testing and validating Lattice-ID locally.
 
 ## Status
 
-**v1.0.0**
+**v1.2.1**
 
 - Full OIDC/OAuth2 compliance (authorization code + PKCE, client credentials, device flow, refresh token rotation)
 - Security hardening: CSRF protection, refresh token absolute lifetime cap, account lockout, rate limiting, consent screen
@@ -78,6 +78,10 @@ bash deploy/deploy-local.sh status    # show cluster status
 
 The `deploy/workloaddeployment-local.yaml` manifest includes a `bootstrap_hook`
 that promotes the first registered user to superadmin automatically.
+
+When the bootstrap hook promotes a superadmin (`set_superadmin(true)`), the
+gateway also creates the built-in `lid-admin` OAuth client so the admin UI is
+immediately usable without any manual client registration.
 
 To restrict bootstrap to a specific email, edit the inline Rhai hook:
 
