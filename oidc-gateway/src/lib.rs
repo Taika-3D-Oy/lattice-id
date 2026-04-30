@@ -5,6 +5,7 @@ pub mod bindings {
         async: [
             "import:wasi:config/store@0.2.0-rc.1#get",
             "import:wasi:config/store@0.2.0-rc.1#get-all",
+            "import:wasi:sockets/types@0.3.0-rc-2026-03-15#[method]tcp-socket.connect",
             "import:wasmcloud:messaging/consumer@0.2.0#request",
             "import:wasmcloud:messaging/consumer@0.2.0#publish",
         ],

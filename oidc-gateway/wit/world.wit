@@ -4,6 +4,7 @@ world gateway {
     import lattice-id:crypto/password;
     import lattice-id:admin/assets;
     import wasi:config/store@0.2.0-rc.1;
+    import wasi:sockets/types@0.3.0-rc-2026-03-15;
     import wasmcloud:messaging/consumer@0.2.0;
     import lattice-id:notify/email;
     import taika3d:lid/abuse;

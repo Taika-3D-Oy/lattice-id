@@ -4,7 +4,7 @@ mod bindings {
         world: "key-manager",
         path: "wit",
         async: [
-            "import:wasmcloud:messaging/consumer@0.2.0#request",
+            "import:wasi:sockets/types@0.3.0-rc-2026-03-15#[method]tcp-socket.connect",
             "export:taika3d:lid/keys#get-public-key",
             "export:taika3d:lid/keys#get-public-keys",
             "export:taika3d:lid/keys#get-kid",
@@ -16,8 +16,9 @@ mod bindings {
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bindings::exports::taika3d::lid::keys::Guest;
-use bindings::wasi::config::store as config_store;
-use bindings::wasmcloud::messaging::consumer;
+use bindings::wasi::sockets::types::{
+    IpAddressFamily, IpSocketAddress, Ipv4SocketAddress, TcpSocket,
+};
 use p256::ecdsa::SigningKey as EcSigningKey;
 use rsa::pkcs1v15::SigningKey;
 use rsa::signature::{SignatureEncoding, Signer};
@@ -39,73 +40,100 @@ struct LoadedKeys {
 
 const KEY_NAME: &str = "signing-key-v1";
 const EC_KEY_NAME: &str = "signing-key-ec-v1";
-const TIMEOUT_MS: u32 = 5000;
+const LDB_TCP_PORT: u16 = 4080;
 
 fn keys_table() -> String {
     "keys".to_string()
 }
 
-/// Build a lattice-db NATS subject from the configured instance prefix.
-/// Reads `ldb_instance` config (defaults to `"lid"`).
-fn ldb_subject(op: &str) -> String {
-    let instance = config_store::get("ldb_instance")
-        .ok()
-        .flatten()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "lid".to_string());
-    format!("{instance}.{op}")
-}
-
 use std::cell::RefCell;
 use std::collections::HashMap;
+use wit_bindgen::StreamResult;
 
 thread_local! {
     static SESSION_REVISIONS: RefCell<HashMap<String, u64>> = RefCell::new(HashMap::new());
 }
 
-/// Send a JSON request to lattice-db via wasmcloud:messaging and parse the response.
-/// Injects `consistency.min_revision` and extracts `session.revisions` (lattice-db ≥ 1.6.0).
+/// Send a JSON request to lattice-db via localhost TCP.
+/// Wire protocol: 4-byte BE length prefix + JSON body (with `_op` field).
 async fn ldb_request(
-    subject: &str,
+    op: &str,
     payload: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    let (payload, has_consistency) =
-        if let Some(table) = payload.get("table").and_then(|t| t.as_str()) {
-            let min_rev = SESSION_REVISIONS.with(|sr| sr.borrow().get(table).copied());
-            if let Some(rev) = min_rev {
-                let mut p = payload.clone();
-                p.as_object_mut().unwrap().insert(
-                    "consistency".to_string(),
-                    serde_json::json!({ "min_revision": rev }),
-                );
-                (p, true)
-            } else {
-                (payload.clone(), false)
-            }
-        } else {
-            (payload.clone(), false)
-        };
+    // Inject _op and consistency context.
+    let mut payload = payload.clone();
+    payload.as_object_mut().unwrap().insert(
+        "_op".to_string(),
+        serde_json::Value::String(op.to_string()),
+    );
+
+    if let Some(table) = payload.get("table").and_then(|t| t.as_str()) {
+        let min_rev = SESSION_REVISIONS.with(|sr| sr.borrow().get(table).copied());
+        if let Some(rev) = min_rev {
+            payload.as_object_mut().unwrap().insert(
+                "consistency".to_string(),
+                serde_json::json!({ "min_revision": rev }),
+            );
+        }
+    }
 
     let body = serde_json::to_vec(&payload).map_err(|e| format!("serialize: {e}"))?;
-    let resp = consumer::request(subject.to_string(), body, TIMEOUT_MS).await?;
-    let val: serde_json::Value =
-        serde_json::from_slice(&resp.body).map_err(|e| format!("parse response: {e}"))?;
-    if let Some(err) = val.get("error").and_then(|v| v.as_str()) {
-        if has_consistency && err.contains("stale replica") {
-            let mut fallback = payload.clone();
-            fallback.as_object_mut().unwrap().remove("consistency");
-            let fb_body = serde_json::to_vec(&fallback).map_err(|e| format!("serialize: {e}"))?;
-            let fb_resp = consumer::request(subject.to_string(), fb_body, TIMEOUT_MS).await?;
-            let fb_val: serde_json::Value = serde_json::from_slice(&fb_resp.body)
-                .map_err(|e| format!("parse response: {e}"))?;
-            if let Some(fb_err) = fb_val.get("error").and_then(|v| v.as_str()) {
-                return Err(fb_err.to_string());
-            }
-            return Ok(fb_val);
+
+    // Connect to local lattice-db service.
+    let socket = TcpSocket::create(IpAddressFamily::Ipv4)
+        .map_err(|e| format!("tcp create: {e:?}"))?;
+    let addr = IpSocketAddress::Ipv4(Ipv4SocketAddress {
+        port: LDB_TCP_PORT,
+        address: (127, 0, 0, 1),
+    });
+    socket.connect(addr).await.map_err(|e| format!("tcp connect: {e:?}"))?;
+
+    let (mut rx, _rx_done) = socket.receive();
+    let (mut tx, tx_rx) = bindings::wit_stream::new::<u8>();
+    let _send_fut = socket.send(tx_rx);
+
+    // Write request frame: [4 bytes length][payload]
+    let len_bytes = (body.len() as u32).to_be_bytes();
+    let mut frame = Vec::with_capacity(4 + body.len());
+    frame.extend_from_slice(&len_bytes);
+    frame.extend_from_slice(&body);
+    let remaining = tx.write_all(frame).await;
+    if !remaining.is_empty() {
+        return Err("tcp send failed".into());
+    }
+    // Signal end of request (close write side).
+    drop(tx);
+
+    // Read response frame: [4 bytes length][payload]
+    let mut buf = Vec::new();
+    while buf.len() < 4 {
+        let read_buf = Vec::with_capacity(4096);
+        let (status, data) = rx.read(read_buf).await;
+        match status {
+            StreamResult::Complete(n) => buf.extend_from_slice(&data[..n]),
+            _ => return Err("tcp read failed (length)".into()),
         }
+    }
+    let resp_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+    buf.drain(..4);
+
+    while buf.len() < resp_len {
+        let read_buf = Vec::with_capacity(4096);
+        let (status, data) = rx.read(read_buf).await;
+        match status {
+            StreamResult::Complete(n) => buf.extend_from_slice(&data[..n]),
+            _ => return Err("tcp read failed (body)".into()),
+        }
+    }
+
+    let val: serde_json::Value = serde_json::from_slice(&buf[..resp_len])
+        .map_err(|e| format!("parse response: {e}"))?;
+
+    if let Some(err) = val.get("error").and_then(|v| v.as_str()) {
         return Err(err.to_string());
     }
 
+    // Track session revisions for consistency.
     if let Some(session) = val.get("session").and_then(|s| s.as_object())
         && let Some(revisions) = session.get("revisions").and_then(|r| r.as_object())
     {
@@ -140,7 +168,7 @@ async fn ldb_request(
 /// Try to load the signing key from lattice-db.
 async fn load_from_db() -> Result<Option<StoredKey>, String> {
     let payload = serde_json::json!({ "table": keys_table(), "key": KEY_NAME });
-    match ldb_request(&ldb_subject("get"), &payload).await {
+    match ldb_request("get", &payload).await {
         Ok(resp) => {
             let value_b64 = resp
                 .get("value")
@@ -183,7 +211,7 @@ async fn generate_and_store() -> Result<StoredKey, String> {
     let value_b64 = base64::engine::general_purpose::STANDARD.encode(&stored_bytes);
     let payload = serde_json::json!({ "table": keys_table(), "key": KEY_NAME, "value": value_b64 });
 
-    match ldb_request(&ldb_subject("create"), &payload).await {
+    match ldb_request("create", &payload).await {
         Ok(_) => {
             eprintln!("KEY-MANAGER: generated and stored new signing key kid={kid}");
             Ok(stored)
@@ -395,7 +423,7 @@ impl StoredEcKey {
 
 async fn load_ec_from_db() -> Result<Option<StoredEcKey>, String> {
     let payload = serde_json::json!({ "table": keys_table(), "key": EC_KEY_NAME });
-    match ldb_request(&ldb_subject("get"), &payload).await {
+    match ldb_request("get", &payload).await {
         Ok(resp) => {
             let value_b64 = resp
                 .get("value")
@@ -436,7 +464,7 @@ async fn generate_and_store_ec() -> Result<StoredEcKey, String> {
     let payload =
         serde_json::json!({ "table": keys_table(), "key": EC_KEY_NAME, "value": value_b64 });
 
-    match ldb_request(&ldb_subject("create"), &payload).await {
+    match ldb_request("create", &payload).await {
         Ok(_) => {
             eprintln!("KEY-MANAGER: generated and stored new EC signing key kid={kid}");
             Ok(stored)

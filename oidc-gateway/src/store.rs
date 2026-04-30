@@ -584,78 +584,97 @@ const TTL_LOCKOUT: u64 = 3600; // 1 hour (generous buffer over default 15 min lo
 const TTL_INVITATION: u64 = 86400 * 7; // 7 days
 const TTL_AUDIT: u64 = 86400 * 90; // 90 days
 
-// ── lattice-db via wasmcloud:messaging (sync, host-managed NATS) ──
+// ── lattice-db via localhost TCP (co-located service) ──
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 
-const LDB_TIMEOUT_MS: u32 = 5000;
+const LDB_TCP_PORT: u16 = 4080;
 
-/// Build a lattice-db NATS subject from the configured instance prefix.
-/// Reads `ldb_instance` from the cached config (defaults to `"lid"`).
-fn ldb_subject(op: &str) -> String {
-    let instance = config_value("ldb_instance").unwrap_or_else(|| "lid".to_string());
-    format!("{instance}.{op}")
-}
-
-/// Send a JSON request to lattice-db via the host's NATS connection.
-/// Automatically injects `consistency.min_revision` for table-scoped reads
-/// and extracts `session.revisions` from responses (lattice-db ≥ 1.6.0).
+/// Send a JSON request to lattice-db via localhost TCP.
+/// Wire protocol: 4-byte BE length prefix + JSON body (with `_op` field).
 async fn ldb_request(
-    subject: &str,
+    op: &str,
     payload: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    // Inject consistency context when the payload targets a specific table.
-    let (payload, has_consistency) =
-        if let Some(table) = payload.get("table").and_then(|t| t.as_str()) {
-            let min_rev = SESSION_REVISIONS.with(|sr| sr.borrow().get(table).copied());
-            if let Some(rev) = min_rev {
-                let mut p = payload.clone();
-                p.as_object_mut().unwrap().insert(
-                    "consistency".to_string(),
-                    serde_json::json!({ "min_revision": rev }),
-                );
-                (p, true)
-            } else {
-                (payload.clone(), false)
-            }
-        } else {
-            (payload.clone(), false)
-        };
+    use crate::bindings::wasi::sockets::types::{
+        IpAddressFamily, IpSocketAddress, Ipv4SocketAddress, TcpSocket,
+    };
+    use wit_bindgen::StreamResult;
+
+    // Build payload with _op and consistency context.
+    let mut payload = payload.clone();
+    payload.as_object_mut().unwrap().insert(
+        "_op".to_string(),
+        serde_json::Value::String(op.to_string()),
+    );
+
+    if let Some(table) = payload.get("table").and_then(|t| t.as_str()) {
+        let min_rev = SESSION_REVISIONS.with(|sr| sr.borrow().get(table).copied());
+        if let Some(rev) = min_rev {
+            payload.as_object_mut().unwrap().insert(
+                "consistency".to_string(),
+                serde_json::json!({ "min_revision": rev }),
+            );
+        }
+    }
 
     let body = serde_json::to_vec(&payload).map_err(|e| format!("serialize: {e}"))?;
-    let resp = crate::bindings::wasmcloud::messaging::consumer::request(
-        subject.to_string(),
-        body,
-        LDB_TIMEOUT_MS,
-    )
-    .await?;
-    let val: serde_json::Value =
-        serde_json::from_slice(&resp.body).map_err(|e| format!("parse response: {e}"))?;
-    if let Some(err) = val.get("error").and_then(|v| v.as_str()) {
-        // If the replica couldn't catch up to the requested revision, retry
-        // without the consistency constraint rather than failing the request.
-        if has_consistency && err.contains("stale replica") {
-            let mut fallback = payload.clone();
-            fallback.as_object_mut().unwrap().remove("consistency");
-            let fb_body = serde_json::to_vec(&fallback).map_err(|e| format!("serialize: {e}"))?;
-            let fb_resp = crate::bindings::wasmcloud::messaging::consumer::request(
-                subject.to_string(),
-                fb_body,
-                LDB_TIMEOUT_MS,
-            )
-            .await?;
-            let fb_val: serde_json::Value = serde_json::from_slice(&fb_resp.body)
-                .map_err(|e| format!("parse response: {e}"))?;
-            if let Some(fb_err) = fb_val.get("error").and_then(|v| v.as_str()) {
-                return Err(fb_err.to_string());
-            }
-            return Ok(fb_val);
+
+    // Connect to local lattice-db service.
+    let socket = TcpSocket::create(IpAddressFamily::Ipv4)
+        .map_err(|e| format!("tcp create: {e:?}"))?;
+    let addr = IpSocketAddress::Ipv4(Ipv4SocketAddress {
+        port: LDB_TCP_PORT,
+        address: (127, 0, 0, 1),
+    });
+    socket.connect(addr).await.map_err(|e| format!("tcp connect: {e:?}"))?;
+
+    let (mut rx, _rx_done) = socket.receive();
+    let (mut tx, tx_rx) = crate::bindings::wit_stream::new::<u8>();
+    let _send_fut = socket.send(tx_rx);
+
+    // Write request frame: [4 bytes length][payload]
+    let len_bytes = (body.len() as u32).to_be_bytes();
+    let mut frame = Vec::with_capacity(4 + body.len());
+    frame.extend_from_slice(&len_bytes);
+    frame.extend_from_slice(&body);
+    let remaining = tx.write_all(frame).await;
+    if !remaining.is_empty() {
+        return Err("tcp send failed".into());
+    }
+    drop(tx);
+
+    // Read response frame: [4 bytes length][payload]
+    let mut buf = Vec::new();
+    while buf.len() < 4 {
+        let read_buf = Vec::with_capacity(4096);
+        let (status, data) = rx.read(read_buf).await;
+        match status {
+            StreamResult::Complete(n) => buf.extend_from_slice(&data[..n]),
+            _ => return Err("tcp read failed (length)".into()),
         }
+    }
+    let resp_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+    buf.drain(..4);
+
+    while buf.len() < resp_len {
+        let read_buf = Vec::with_capacity(4096);
+        let (status, data) = rx.read(read_buf).await;
+        match status {
+            StreamResult::Complete(n) => buf.extend_from_slice(&data[..n]),
+            _ => return Err("tcp read failed (body)".into()),
+        }
+    }
+
+    let val: serde_json::Value = serde_json::from_slice(&buf[..resp_len])
+        .map_err(|e| format!("parse response: {e}"))?;
+
+    if let Some(err) = val.get("error").and_then(|v| v.as_str()) {
         return Err(err.to_string());
     }
 
-    // Merge session revisions from the response (lattice-db 1.6.0+).
+    // Track session revisions for consistency.
     if let Some(session) = val.get("session").and_then(|s| s.as_object())
         && let Some(revisions) = session.get("revisions").and_then(|r| r.as_object())
     {
@@ -672,7 +691,6 @@ async fn ldb_request(
         });
     }
 
-    // Backward-compatible fallback: infer from single-table write responses.
     if let (Some(table), Some(revision)) = (
         payload.get("table").and_then(|t| t.as_str()),
         val.get("revision").and_then(|v| v.as_u64()),
@@ -699,7 +717,7 @@ async fn kv_get<T: serde::de::DeserializeOwned>(
     key: &str,
 ) -> Result<Option<T>, String> {
     let payload = serde_json::json!({ "table": store_name, "key": key });
-    match ldb_request(&ldb_subject("get"), &payload).await {
+    match ldb_request("get", &payload).await {
         Ok(resp) => {
             let value_b64 = resp
                 .get("value")
@@ -718,7 +736,7 @@ async fn kv_get<T: serde::de::DeserializeOwned>(
 
 async fn kv_get_raw(store_name: &str, key: &str) -> Result<Option<Vec<u8>>, String> {
     let payload = serde_json::json!({ "table": store_name, "key": key });
-    match ldb_request(&ldb_subject("get"), &payload).await {
+    match ldb_request("get", &payload).await {
         Ok(resp) => {
             let value_b64 = resp
                 .get("value")
@@ -740,7 +758,7 @@ async fn kv_get_revision<T: serde::de::DeserializeOwned>(
     key: &str,
 ) -> Result<Option<(T, u64)>, String> {
     let payload = serde_json::json!({ "table": store_name, "key": key });
-    match ldb_request(&ldb_subject("get"), &payload).await {
+    match ldb_request("get", &payload).await {
         Ok(resp) => {
             let value_b64 = resp
                 .get("value")
@@ -762,14 +780,14 @@ pub async fn kv_set<T: Serialize>(store_name: &str, key: &str, value: &T) -> Res
     let bytes = serde_json::to_vec(value).map_err(|e| format!("serialize: {e}"))?;
     let value_b64 = B64.encode(&bytes);
     let payload = serde_json::json!({ "table": store_name, "key": key, "value": value_b64 });
-    ldb_request(&ldb_subject("put"), &payload).await?;
+    ldb_request("put", &payload).await?;
     Ok(())
 }
 
 async fn kv_set_raw(store_name: &str, key: &str, value: &[u8]) -> Result<(), String> {
     let value_b64 = B64.encode(value);
     let payload = serde_json::json!({ "table": store_name, "key": key, "value": value_b64 });
-    ldb_request(&ldb_subject("put"), &payload).await?;
+    ldb_request("put", &payload).await?;
     Ok(())
 }
 
@@ -781,7 +799,7 @@ async fn kv_set_with_ttl(
 ) -> Result<(), String> {
     let value_b64 = B64.encode(value);
     let payload = serde_json::json!({ "table": store_name, "key": key, "value": value_b64, "ttl_seconds": ttl_secs });
-    ldb_request(&ldb_subject("put"), &payload).await?;
+    ldb_request("put", &payload).await?;
     Ok(())
 }
 
@@ -794,7 +812,7 @@ async fn kv_set_ttl<T: Serialize>(
     let bytes = serde_json::to_vec(value).map_err(|e| format!("serialize: {e}"))?;
     let value_b64 = B64.encode(&bytes);
     let payload = serde_json::json!({ "table": store_name, "key": key, "value": value_b64, "ttl_seconds": ttl_secs });
-    ldb_request(&ldb_subject("put"), &payload).await?;
+    ldb_request("put", &payload).await?;
     Ok(())
 }
 
@@ -806,13 +824,13 @@ async fn kv_set_raw_ttl(
 ) -> Result<(), String> {
     let value_b64 = B64.encode(value);
     let payload = serde_json::json!({ "table": store_name, "key": key, "value": value_b64, "ttl_seconds": ttl_secs });
-    ldb_request(&ldb_subject("put"), &payload).await?;
+    ldb_request("put", &payload).await?;
     Ok(())
 }
 
 pub async fn kv_delete(store_name: &str, key: &str) -> Result<(), String> {
     let payload = serde_json::json!({ "table": store_name, "key": key });
-    ldb_request(&ldb_subject("delete"), &payload).await?;
+    ldb_request("delete", &payload).await?;
     Ok(())
 }
 
@@ -887,7 +905,7 @@ async fn kv_list_keys(store_name: &str) -> Result<Vec<String>, String> {
         if let Some(ref c) = cursor {
             payload["cursor"] = serde_json::Value::String(c.clone());
         }
-        let resp = ldb_request(&ldb_subject("keys"), &payload).await?;
+        let resp = ldb_request("keys", &payload).await?;
         if let Some(keys) = resp.get("keys").and_then(|v| v.as_array()) {
             for k in keys {
                 if let Some(s) = k.as_str() {
@@ -905,7 +923,7 @@ async fn kv_list_keys(store_name: &str) -> Result<Vec<String>, String> {
 
 async fn kv_exists(store_name: &str, key: &str) -> Result<bool, String> {
     let payload = serde_json::json!({ "table": store_name, "key": key });
-    let resp = ldb_request(&ldb_subject("exists"), &payload).await?;
+    let resp = ldb_request("exists", &payload).await?;
     Ok(resp
         .get("exists")
         .and_then(|v| v.as_bool())
@@ -922,7 +940,7 @@ async fn kv_cas_swap<T: serde::Serialize>(
     let bytes = serde_json::to_vec(value).map_err(|e| format!("serialize: {e}"))?;
     let value_b64 = B64.encode(&bytes);
     let payload = serde_json::json!({ "table": store_name, "key": key, "value": value_b64, "revision": revision });
-    let resp = ldb_request(&ldb_subject("cas"), &payload).await?;
+    let resp = ldb_request("cas", &payload).await?;
     Ok(resp.get("revision").and_then(|v| v.as_u64()).unwrap_or(0))
 }
 
@@ -937,7 +955,7 @@ async fn kv_cas_swap_ttl<T: serde::Serialize>(
     let bytes = serde_json::to_vec(value).map_err(|e| format!("serialize: {e}"))?;
     let value_b64 = B64.encode(&bytes);
     let payload = serde_json::json!({ "table": store_name, "key": key, "value": value_b64, "revision": revision, "ttl_seconds": ttl_secs });
-    let resp = ldb_request(&ldb_subject("cas"), &payload).await?;
+    let resp = ldb_request("cas", &payload).await?;
     Ok(resp.get("revision").and_then(|v| v.as_u64()).unwrap_or(0))
 }
 
@@ -950,7 +968,7 @@ async fn kv_cas_create<T: serde::Serialize>(
     let bytes = serde_json::to_vec(value).map_err(|e| format!("serialize: {e}"))?;
     let value_b64 = B64.encode(&bytes);
     let payload = serde_json::json!({ "table": store_name, "key": key, "value": value_b64 });
-    let resp = ldb_request(&ldb_subject("create"), &payload).await?;
+    let resp = ldb_request("create", &payload).await?;
     Ok(resp.get("revision").and_then(|v| v.as_u64()).unwrap_or(0))
 }
 
@@ -958,14 +976,14 @@ async fn kv_cas_create<T: serde::Serialize>(
 async fn kv_cas_create_raw(store_name: &str, key: &str, value: &[u8]) -> Result<u64, String> {
     let value_b64 = B64.encode(value);
     let payload = serde_json::json!({ "table": store_name, "key": key, "value": value_b64 });
-    let resp = ldb_request(&ldb_subject("create"), &payload).await?;
+    let resp = ldb_request("create", &payload).await?;
     Ok(resp.get("revision").and_then(|v| v.as_u64()).unwrap_or(0))
 }
 
 /// Atomically delete a key only if the revision matches.
 async fn kv_cas_delete(store_name: &str, key: &str, revision: u64) -> Result<(), String> {
     let payload = serde_json::json!({ "table": store_name, "key": key, "revision": revision });
-    ldb_request(&ldb_subject("cas_delete"), &payload).await?;
+    ldb_request("cas_delete", &payload).await?;
     Ok(())
 }
 
@@ -976,7 +994,7 @@ async fn kv_get_raw_revision(
     key: &str,
 ) -> Result<Option<(Vec<u8>, u64)>, String> {
     let payload = serde_json::json!({ "table": store_name, "key": key });
-    match ldb_request(&ldb_subject("get"), &payload).await {
+    match ldb_request("get", &payload).await {
         Ok(resp) => {
             let value_b64 = resp
                 .get("value")
@@ -1590,7 +1608,7 @@ pub async fn record_failed_login(user_id: &str) -> Result<bool, String> {
                 "table": store_name, "key": key, "value": value_b64,
                 "ttl_seconds": TTL_LOCKOUT,
             });
-            ldb_request(&ldb_subject("create"), &payload).await
+            ldb_request("create", &payload).await
         } else {
             // Existing counter — CAS update
             kv_cas_swap_ttl(&store_name, &key, &attempts, revision, TTL_LOCKOUT)

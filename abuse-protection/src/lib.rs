@@ -4,7 +4,7 @@ mod bindings {
         world: "abuse-protection",
         path: "wit",
         async: [
-            "import:wasmcloud:messaging/consumer@0.2.0#request",
+            "import:wasi:sockets/types@0.3.0-rc-2026-03-15#[method]tcp-socket.connect",
             "export:taika3d:lid/abuse#check-rate",
             "export:taika3d:lid/abuse#record-metric",
         ],
@@ -14,26 +14,11 @@ mod bindings {
 
 use base64::Engine;
 use bindings::exports::taika3d::lid::abuse::Guest;
-use bindings::wasi::config::store as config_store;
-use bindings::wasmcloud::messaging::consumer;
 
 struct AbuseProtection;
 
-const TIMEOUT_MS: u32 = 5000;
-
 fn rate_limits_table() -> String {
     "abuse-rate-limits".to_string()
-}
-
-/// Build a lattice-db NATS subject from the configured instance prefix.
-/// Reads `ldb_instance` config (defaults to `"lid"`).
-fn ldb_subject(op: &str) -> String {
-    let instance = config_store::get("ldb_instance")
-        .ok()
-        .flatten()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "lid".to_string());
-    format!("{instance}.{op}")
 }
 
 use std::cell::RefCell;
@@ -43,46 +28,83 @@ thread_local! {
     static SESSION_REVISIONS: RefCell<HashMap<String, u64>> = RefCell::new(HashMap::new());
 }
 
-/// Send a JSON request to lattice-db via wasmcloud:messaging and parse the response.
-/// Injects `consistency.min_revision` and extracts `session.revisions` (lattice-db ≥ 1.6.0).
+/// Send a JSON request to lattice-db via localhost TCP.
 async fn ldb_request(
-    subject: &str,
+    op: &str,
     payload: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    let (payload, has_consistency) =
-        if let Some(table) = payload.get("table").and_then(|t| t.as_str()) {
-            let min_rev = SESSION_REVISIONS.with(|sr| sr.borrow().get(table).copied());
-            if let Some(rev) = min_rev {
-                let mut p = payload.clone();
-                p.as_object_mut().unwrap().insert(
-                    "consistency".to_string(),
-                    serde_json::json!({ "min_revision": rev }),
-                );
-                (p, true)
-            } else {
-                (payload.clone(), false)
-            }
-        } else {
-            (payload.clone(), false)
-        };
+    use crate::bindings::wasi::sockets::types::{
+        IpAddressFamily, IpSocketAddress, Ipv4SocketAddress, TcpSocket,
+    };
+    use wit_bindgen::StreamResult;
+
+    const LDB_TCP_PORT: u16 = 4080;
+
+    let mut payload = payload.clone();
+    payload.as_object_mut().unwrap().insert(
+        "_op".to_string(),
+        serde_json::Value::String(op.to_string()),
+    );
+
+    if let Some(table) = payload.get("table").and_then(|t| t.as_str()) {
+        let min_rev = SESSION_REVISIONS.with(|sr| sr.borrow().get(table).copied());
+        if let Some(rev) = min_rev {
+            payload.as_object_mut().unwrap().insert(
+                "consistency".to_string(),
+                serde_json::json!({ "min_revision": rev }),
+            );
+        }
+    }
 
     let body = serde_json::to_vec(&payload).map_err(|e| format!("serialize: {e}"))?;
-    let resp = consumer::request(subject.to_string(), body, TIMEOUT_MS).await?;
-    let val: serde_json::Value =
-        serde_json::from_slice(&resp.body).map_err(|e| format!("parse response: {e}"))?;
-    if let Some(err) = val.get("error").and_then(|v| v.as_str()) {
-        if has_consistency && err.contains("stale replica") {
-            let mut fallback = payload.clone();
-            fallback.as_object_mut().unwrap().remove("consistency");
-            let fb_body = serde_json::to_vec(&fallback).map_err(|e| format!("serialize: {e}"))?;
-            let fb_resp = consumer::request(subject.to_string(), fb_body, TIMEOUT_MS).await?;
-            let fb_val: serde_json::Value = serde_json::from_slice(&fb_resp.body)
-                .map_err(|e| format!("parse response: {e}"))?;
-            if let Some(fb_err) = fb_val.get("error").and_then(|v| v.as_str()) {
-                return Err(fb_err.to_string());
-            }
-            return Ok(fb_val);
+
+    let socket = TcpSocket::create(IpAddressFamily::Ipv4)
+        .map_err(|e| format!("tcp create: {e:?}"))?;
+    let addr = IpSocketAddress::Ipv4(Ipv4SocketAddress {
+        port: LDB_TCP_PORT,
+        address: (127, 0, 0, 1),
+    });
+    socket.connect(addr).await.map_err(|e| format!("tcp connect: {e:?}"))?;
+
+    let (mut rx, _rx_done) = socket.receive();
+    let (mut tx, tx_rx) = crate::bindings::wit_stream::new::<u8>();
+    let _send_fut = socket.send(tx_rx);
+
+    let len_bytes = (body.len() as u32).to_be_bytes();
+    let mut frame = Vec::with_capacity(4 + body.len());
+    frame.extend_from_slice(&len_bytes);
+    frame.extend_from_slice(&body);
+    let remaining = tx.write_all(frame).await;
+    if !remaining.is_empty() {
+        return Err("tcp send failed".into());
+    }
+    drop(tx);
+
+    let mut buf = Vec::new();
+    while buf.len() < 4 {
+        let read_buf = Vec::with_capacity(4096);
+        let (status, data) = rx.read(read_buf).await;
+        match status {
+            StreamResult::Complete(n) => buf.extend_from_slice(&data[..n]),
+            _ => return Err("tcp read failed (length)".into()),
         }
+    }
+    let resp_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+    buf.drain(..4);
+
+    while buf.len() < resp_len {
+        let read_buf = Vec::with_capacity(4096);
+        let (status, data) = rx.read(read_buf).await;
+        match status {
+            StreamResult::Complete(n) => buf.extend_from_slice(&data[..n]),
+            _ => return Err("tcp read failed (body)".into()),
+        }
+    }
+
+    let val: serde_json::Value = serde_json::from_slice(&buf[..resp_len])
+        .map_err(|e| format!("parse response: {e}"))?;
+
+    if let Some(err) = val.get("error").and_then(|v| v.as_str()) {
         return Err(err.to_string());
     }
 
@@ -101,6 +123,7 @@ async fn ldb_request(
             }
         });
     }
+
     if let (Some(table), Some(revision)) = (
         payload.get("table").and_then(|t| t.as_str()),
         val.get("revision").and_then(|v| v.as_u64()),
@@ -135,7 +158,7 @@ impl Guest for AbuseProtection {
         for _attempt in 0..MAX_RETRIES {
             // Read current counter with revision
             let payload = serde_json::json!({ "table": table, "key": db_key });
-            let (count, revision) = match ldb_request(&ldb_subject("get"), &payload).await {
+            let (count, revision) = match ldb_request("get", &payload).await {
                 Ok(resp) => {
                     let value_b64 = resp.get("value").and_then(|v| v.as_str()).unwrap_or("MA==");
                     let bytes = base64::engine::general_purpose::STANDARD
@@ -166,7 +189,7 @@ impl Guest for AbuseProtection {
                     "value": new_value,
                     "ttl_seconds": window_secs + 10,
                 });
-                match ldb_request(&ldb_subject("create"), &payload).await {
+                match ldb_request("create", &payload).await {
                     Ok(_) => return Ok((true, limit - count - 1)),
                     Err(e) if e.contains("already exists") => {
                         continue; // retry — re-read the real count and CAS
@@ -181,7 +204,7 @@ impl Guest for AbuseProtection {
                     "value": new_value,
                     "revision": revision,
                 });
-                match ldb_request(&ldb_subject("cas"), &payload).await {
+                match ldb_request("cas", &payload).await {
                     Ok(_) => return Ok((true, limit - count - 1)),
                     Err(e) if e.contains("revision mismatch") => {
                         continue; // retry with fresh revision

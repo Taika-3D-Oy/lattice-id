@@ -39,7 +39,7 @@ mod bindings {
         world: "crypto-vault",
         path: "wit",
         async: [
-            "import:wasmcloud:messaging/consumer@0.2.0#request",
+            "import:wasi:sockets/types@0.3.0-rc-2026-03-15#[method]tcp-socket.connect",
             "export:taika3d:lid/vault#encrypt",
             "export:taika3d:lid/vault#decrypt",
             "export:taika3d:lid/vault#rotate-master",
@@ -50,7 +50,6 @@ mod bindings {
 
 use bindings::exports::taika3d::lid::vault::{Guest, VaultError};
 use bindings::wasi::config::store as config_store;
-use bindings::wasmcloud::messaging::consumer;
 
 use aes_gcm::{
     Aes256Gcm, Key, Nonce,
@@ -72,8 +71,6 @@ const NONCE_LEN: usize = 12;
 const MIN_ENVELOPE_LEN: usize = VERSION_LEN + NONCE_LEN + 17;
 /// Key name prefix used in the vault KV bucket.
 const MASTER_KEY_PREFIX: &str = "master";
-/// Messaging request timeout (ms).
-const TIMEOUT_MS: u32 = 5000;
 
 // ── Thread-local state ───────────────────────────────────────
 
@@ -93,61 +90,89 @@ fn vault_table() -> String {
     "vault".to_string()
 }
 
-/// Build a lattice-db NATS subject from the configured instance prefix.
-/// Reads `ldb_instance` config (defaults to `"lid"`).
-fn ldb_subject(op: &str) -> String {
-    let instance = config_store::get("ldb_instance")
-        .ok()
-        .flatten()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "lid".to_string());
-    format!("{instance}.{op}")
-}
-
 use std::collections::HashMap;
 
 thread_local! {
     static SESSION_REVISIONS: RefCell<HashMap<String, u64>> = RefCell::new(HashMap::new());
 }
 
+/// Send a JSON request to lattice-db via localhost TCP.
 async fn ldb_request(
-    subject: &str,
+    op: &str,
     payload: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    let (payload, has_consistency) =
-        if let Some(table) = payload.get("table").and_then(|t| t.as_str()) {
-            let min_rev = SESSION_REVISIONS.with(|sr| sr.borrow().get(table).copied());
-            if let Some(rev) = min_rev {
-                let mut p = payload.clone();
-                p.as_object_mut().unwrap().insert(
-                    "consistency".to_string(),
-                    serde_json::json!({ "min_revision": rev }),
-                );
-                (p, true)
-            } else {
-                (payload.clone(), false)
-            }
-        } else {
-            (payload.clone(), false)
-        };
+    use crate::bindings::wasi::sockets::types::{
+        IpAddressFamily, IpSocketAddress, Ipv4SocketAddress, TcpSocket,
+    };
+    use wit_bindgen::StreamResult;
+
+    const LDB_TCP_PORT: u16 = 4080;
+
+    let mut payload = payload.clone();
+    payload.as_object_mut().unwrap().insert(
+        "_op".to_string(),
+        serde_json::Value::String(op.to_string()),
+    );
+
+    if let Some(table) = payload.get("table").and_then(|t| t.as_str()) {
+        let min_rev = SESSION_REVISIONS.with(|sr| sr.borrow().get(table).copied());
+        if let Some(rev) = min_rev {
+            payload.as_object_mut().unwrap().insert(
+                "consistency".to_string(),
+                serde_json::json!({ "min_revision": rev }),
+            );
+        }
+    }
 
     let body = serde_json::to_vec(&payload).map_err(|e| format!("serialize: {e}"))?;
-    let resp = consumer::request(subject.to_string(), body, TIMEOUT_MS).await?;
-    let val: serde_json::Value =
-        serde_json::from_slice(&resp.body).map_err(|e| format!("parse: {e}"))?;
-    if let Some(err) = val.get("error").and_then(|v| v.as_str()) {
-        if has_consistency && err.contains("stale replica") {
-            let mut fallback = payload.clone();
-            fallback.as_object_mut().unwrap().remove("consistency");
-            let fb_body = serde_json::to_vec(&fallback).map_err(|e| format!("serialize: {e}"))?;
-            let fb_resp = consumer::request(subject.to_string(), fb_body, TIMEOUT_MS).await?;
-            let fb_val: serde_json::Value =
-                serde_json::from_slice(&fb_resp.body).map_err(|e| format!("parse: {e}"))?;
-            if let Some(fb_err) = fb_val.get("error").and_then(|v| v.as_str()) {
-                return Err(fb_err.to_string());
-            }
-            return Ok(fb_val);
+
+    let socket = TcpSocket::create(IpAddressFamily::Ipv4)
+        .map_err(|e| format!("tcp create: {e:?}"))?;
+    let addr = IpSocketAddress::Ipv4(Ipv4SocketAddress {
+        port: LDB_TCP_PORT,
+        address: (127, 0, 0, 1),
+    });
+    socket.connect(addr).await.map_err(|e| format!("tcp connect: {e:?}"))?;
+
+    let (mut rx, _rx_done) = socket.receive();
+    let (mut tx, tx_rx) = crate::bindings::wit_stream::new::<u8>();
+    let _send_fut = socket.send(tx_rx);
+
+    let len_bytes = (body.len() as u32).to_be_bytes();
+    let mut frame = Vec::with_capacity(4 + body.len());
+    frame.extend_from_slice(&len_bytes);
+    frame.extend_from_slice(&body);
+    let remaining = tx.write_all(frame).await;
+    if !remaining.is_empty() {
+        return Err("tcp send failed".into());
+    }
+    drop(tx);
+
+    let mut buf = Vec::new();
+    while buf.len() < 4 {
+        let read_buf = Vec::with_capacity(4096);
+        let (status, data) = rx.read(read_buf).await;
+        match status {
+            StreamResult::Complete(n) => buf.extend_from_slice(&data[..n]),
+            _ => return Err("tcp read failed (length)".into()),
         }
+    }
+    let resp_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+    buf.drain(..4);
+
+    while buf.len() < resp_len {
+        let read_buf = Vec::with_capacity(4096);
+        let (status, data) = rx.read(read_buf).await;
+        match status {
+            StreamResult::Complete(n) => buf.extend_from_slice(&data[..n]),
+            _ => return Err("tcp read failed (body)".into()),
+        }
+    }
+
+    let val: serde_json::Value = serde_json::from_slice(&buf[..resp_len])
+        .map_err(|e| format!("parse response: {e}"))?;
+
+    if let Some(err) = val.get("error").and_then(|v| v.as_str()) {
         return Err(err.to_string());
     }
 
@@ -166,6 +191,7 @@ async fn ldb_request(
             }
         });
     }
+
     if let (Some(table), Some(revision)) = (
         payload.get("table").and_then(|t| t.as_str()),
         val.get("revision").and_then(|v| v.as_u64()),
@@ -185,7 +211,7 @@ async fn ldb_request(
 /// Read raw bytes from a KV bucket (returns None when the key doesn't exist).
 async fn kv_get_raw(table: &str, key: &str) -> Result<Option<Vec<u8>>, String> {
     let payload = serde_json::json!({ "table": table, "key": key });
-    match ldb_request(&ldb_subject("get"), &payload).await {
+    match ldb_request("get", &payload).await {
         Ok(resp) => {
             let b64 = resp
                 .get("value")
@@ -203,7 +229,7 @@ async fn kv_get_raw(table: &str, key: &str) -> Result<Option<Vec<u8>>, String> {
 async fn kv_set_raw(table: &str, key: &str, value: &[u8]) -> Result<(), String> {
     let encoded = B64.encode(value);
     let payload = serde_json::json!({ "table": table, "key": key, "value": encoded });
-    ldb_request(&ldb_subject("put"), &payload).await?;
+    ldb_request("put", &payload).await?;
     Ok(())
 }
 
@@ -277,7 +303,7 @@ async fn load_master_key(version: u32) -> Result<[u8; 32], VaultError> {
         "body": serde_json::json!({ "ciphertext": format!("vault:v1:{ciphertext_b64}") }).to_string()
     });
 
-    let resp = ldb_request(&ldb_subject("kms.request"), &req_payload)
+    let resp = ldb_request("kms.request", &req_payload)
         .await
         .map_err(VaultError::KmsUnavailable)?;
 
@@ -477,7 +503,7 @@ impl Guest for CryptoVault {
                 "body": serde_json::json!({ "plaintext": new_key_b64 }).to_string()
             });
 
-            let resp = ldb_request(&ldb_subject("kms.request"), &req_payload)
+            let resp = ldb_request("kms.request", &req_payload)
                 .await
                 .map_err(VaultError::KmsUnavailable)?;
 
