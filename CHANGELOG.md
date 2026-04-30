@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-04-30
+
+### Changed
+
+- **Switched lattice-db communication from NATS to localhost TCP** — all
+  components that talk to lattice-db now connect to `127.0.0.1:4080` (the
+  co-located lattice-db service) via `wasi:sockets/types` instead of
+  `wasmcloud:messaging/consumer` over NATS request/reply.
+  - Wire protocol: 4-byte big-endian length prefix + JSON body with `_op` field.
+  - Eliminates NATS round-trip overhead; reads hit the local cache via virtual
+    pipes (sub-millisecond latency).
+  - Updated components: oidc-gateway, key-manager, abuse-protection,
+    region-authority, crypto-vault.
+  - oidc-gateway retains NATS messaging for metrics publish.
+
 ## [1.3.2] - 2026-04-30
 
 ### Fixed

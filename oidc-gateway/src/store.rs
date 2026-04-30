@@ -593,10 +593,7 @@ const LDB_TCP_PORT: u16 = 4080;
 
 /// Send a JSON request to lattice-db via localhost TCP.
 /// Wire protocol: 4-byte BE length prefix + JSON body (with `_op` field).
-async fn ldb_request(
-    op: &str,
-    payload: &serde_json::Value,
-) -> Result<serde_json::Value, String> {
+async fn ldb_request(op: &str, payload: &serde_json::Value) -> Result<serde_json::Value, String> {
     use crate::bindings::wasi::sockets::types::{
         IpAddressFamily, IpSocketAddress, Ipv4SocketAddress, TcpSocket,
     };
@@ -604,10 +601,10 @@ async fn ldb_request(
 
     // Build payload with _op and consistency context.
     let mut payload = payload.clone();
-    payload.as_object_mut().unwrap().insert(
-        "_op".to_string(),
-        serde_json::Value::String(op.to_string()),
-    );
+    payload
+        .as_object_mut()
+        .unwrap()
+        .insert("_op".to_string(), serde_json::Value::String(op.to_string()));
 
     if let Some(table) = payload.get("table").and_then(|t| t.as_str()) {
         let min_rev = SESSION_REVISIONS.with(|sr| sr.borrow().get(table).copied());
@@ -622,13 +619,16 @@ async fn ldb_request(
     let body = serde_json::to_vec(&payload).map_err(|e| format!("serialize: {e}"))?;
 
     // Connect to local lattice-db service.
-    let socket = TcpSocket::create(IpAddressFamily::Ipv4)
-        .map_err(|e| format!("tcp create: {e:?}"))?;
+    let socket =
+        TcpSocket::create(IpAddressFamily::Ipv4).map_err(|e| format!("tcp create: {e:?}"))?;
     let addr = IpSocketAddress::Ipv4(Ipv4SocketAddress {
         port: LDB_TCP_PORT,
         address: (127, 0, 0, 1),
     });
-    socket.connect(addr).await.map_err(|e| format!("tcp connect: {e:?}"))?;
+    socket
+        .connect(addr)
+        .await
+        .map_err(|e| format!("tcp connect: {e:?}"))?;
 
     let (mut rx, _rx_done) = socket.receive();
     let (mut tx, tx_rx) = crate::bindings::wit_stream::new::<u8>();
@@ -667,8 +667,8 @@ async fn ldb_request(
         }
     }
 
-    let val: serde_json::Value = serde_json::from_slice(&buf[..resp_len])
-        .map_err(|e| format!("parse response: {e}"))?;
+    let val: serde_json::Value =
+        serde_json::from_slice(&buf[..resp_len]).map_err(|e| format!("parse response: {e}"))?;
 
     if let Some(err) = val.get("error").and_then(|v| v.as_str()) {
         return Err(err.to_string());
