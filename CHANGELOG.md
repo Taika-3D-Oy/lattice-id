@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.2] - 2026-04-30
+
+### Fixed
+
+- **Double-login race condition** — submitting the login form twice (e.g. via
+  double-click during the 2+ second bcrypt verification) could issue two
+  separate authorization codes for the same session, causing downstream
+  consistency errors.
+  - **Backend:** `complete_login` now consumes the auth session atomically via
+    a CAS delete (`consume_auth_session`). A concurrent second request finds the
+    session already gone and receives a clear error rather than issuing a
+    duplicate code.
+  - **Frontend:** the Sign In and Verify (MFA) buttons are disabled and relabelled
+    (*Signing in…* / *Verifying…*) immediately on form submit, preventing
+    double-clicks from reaching the server at all.
+
 ## [1.3.1] - 2026-04-29
 
 ### Fixed

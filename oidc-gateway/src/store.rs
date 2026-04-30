@@ -1196,6 +1196,20 @@ pub async fn delete_auth_session(session_id: &str) -> Result<(), String> {
     kv_delete(&sessions_store(), &format!("session:{session_id}")).await
 }
 
+/// Atomically get and delete an auth session (CAS). Returns None if already consumed.
+pub async fn consume_auth_session(session_id: &str) -> Result<Option<AuthSession>, String> {
+    let key = format!("session:{session_id}");
+    match kv_get_revision::<AuthSession>(&sessions_store(), &key).await? {
+        Some((session, revision)) => {
+            match kv_cas_delete(&sessions_store(), &key, revision).await {
+                Ok(()) => Ok(Some(session)),
+                Err(_) => Ok(None), // Already consumed by a concurrent request
+            }
+        }
+        None => Ok(None),
+    }
+}
+
 // ── Google OAuth CSRF state ─────────────────────────────────
 
 pub async fn save_google_csrf(csrf_token: &str, session_id: &str) -> Result<(), String> {

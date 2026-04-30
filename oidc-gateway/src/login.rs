@@ -150,13 +150,13 @@ button:hover,.passkey-btn:hover{{background:{primary_hover}}}
 <h1>Sign In</h1>
 <p class="sub">{app_name}</p>
 {error_html}
-<form method="POST" action="/login">
+<form method="POST" action="/login" id="login-form">
 <input type="hidden" name="session_id" value="{session_id}">
 <label for="email">Email</label>
 <input type="email" id="email" name="email" value="{hinted_email}" required autocomplete="email" autofocus>
 <label for="password">Password</label>
 <input type="password" id="password" name="password" required autocomplete="current-password">
-<button type="submit">Sign In</button>
+<button type="submit" id="login-btn">Sign In</button>
 </form>
 {google_html}
 <div id="passkey-section" style="display:none">
@@ -230,6 +230,12 @@ Sign in with passkey
     }}
   }};
 }})();
+// Prevent double-submit on login form
+var f=document.getElementById('login-form');
+if(f)f.addEventListener('submit',function(){{
+  var b=document.getElementById('login-btn');
+  if(b){{b.disabled=true;b.textContent='Signing in\u2026';}}
+}});
 </script>
 </body>
 </html>"#
@@ -286,16 +292,23 @@ button:hover{{background:{primary_hover}}}
 <h1>Two-Factor Authentication</h1>
 <p class="sub">Enter the code from your authenticator app</p>
 {error_html}
-<form method="POST" action="/login/mfa">
+<form method="POST" action="/login/mfa" id="mfa-form">
 <input type="hidden" name="mfa_token" value="{mfa_token}">
 <input type="hidden" name="session_id" value="{session_id}">
 <label for="code">Authentication Code</label>
 <input type="text" id="code" name="code" required autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]{{6,8}}" maxlength="8" autofocus>
-<button type="submit">Verify</button>
+<button type="submit" id="mfa-btn">Verify</button>
 </form>
 <p class="hint">You can also use a recovery code</p>
 <p class="footer">Powered by Lattice-ID</p>
 </div>
+<script>
+var f=document.getElementById('mfa-form');
+if(f)f.addEventListener('submit',function(){{
+  var b=document.getElementById('mfa-btn');
+  if(b){{b.disabled=true;b.textContent='Verifying\u2026';}}
+}});
+</script>
 </body>
 </html>"#
     );
@@ -662,9 +675,9 @@ pub async fn complete_login_with_amr(
     )
     .await;
 
-    let session = crate::store::get_auth_session(session_id)
+    let session = crate::store::consume_auth_session(session_id)
         .await?
-        .ok_or("invalid or expired session")?;
+        .ok_or("Login already in progress. Please wait for the redirect.")?;
     let acr = select_acr(&session, &amr);
 
     // ── Device authorization grant (RFC 8628) ──
@@ -683,7 +696,6 @@ pub async fn complete_login_with_amr(
             )
             .await);
         }
-        let _ = crate::store::delete_auth_session(session_id).await;
         let _ = crate::store::log_audit("device_approved", &user.id, &user.id, &session.client_id)
             .await;
 
@@ -725,7 +737,6 @@ pub async fn complete_login_with_amr(
         // Store the pending auth code *before* consent so we can issue it
         // after approval without re-doing the whole login.
         crate::store::save_auth_code(&code, &auth_code).await?;
-        let _ = crate::store::delete_auth_session(session_id).await;
 
         let client = crate::store::get_client(&auth_code.client_id)
             .await?
@@ -734,7 +745,6 @@ pub async fn complete_login_with_amr(
     }
 
     crate::store::save_auth_code(&code, &auth_code).await?;
-    crate::store::delete_auth_session(session_id).await?;
 
     let mut redirect_url = format!("{}?code={code}", session.redirect_uri);
     if !session.state.is_empty() {
