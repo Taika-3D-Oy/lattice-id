@@ -39,8 +39,8 @@ mod store;
 mod token;
 pub mod totp;
 mod userinfo;
-mod vault;
 pub mod util;
+mod vault;
 
 use http::{Method, Response, StatusCode};
 use wasip3::http::types::ErrorCode;

@@ -120,7 +120,9 @@ async fn generate_and_store() -> Result<StoredKey, String> {
     }
 }
 
-fn stored_key_to_parts(stored: &StoredKey) -> Result<(SigningKey<Sha256>, RsaPublicKey, String), String> {
+fn stored_key_to_parts(
+    stored: &StoredKey,
+) -> Result<(SigningKey<Sha256>, RsaPublicKey, String), String> {
     let n = decode_biguint(&stored.n, "n")?;
     let e = decode_biguint(&stored.e, "e")?;
     let d = decode_biguint(&stored.d, "d")?;

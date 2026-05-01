@@ -62,14 +62,14 @@ fn dev_master_from_seed(seed: &str, version: u32) -> [u8; 32] {
 
 async fn load_master_key(version: u32) -> Result<[u8; 32], VaultError> {
     let kms_endpoint = crate::bindings::wasi::config::store::get("kms_endpoint".to_string())
-            .await
+        .await
         .ok()
         .flatten()
         .unwrap_or_default();
 
     if kms_endpoint.is_empty() {
         let seed = crate::bindings::wasi::config::store::get("kms_dev_seed".to_string())
-                .await
+            .await
             .ok()
             .flatten()
             .unwrap_or_else(|| "lattice-id-insecure-dev-seed-change-in-prod".to_string());
@@ -84,12 +84,12 @@ async fn load_master_key(version: u32) -> Result<[u8; 32], VaultError> {
         .ok_or(VaultError::VersionNotFound(version))?;
 
     let kms_token = crate::bindings::wasi::config::store::get("kms_token".to_string())
-            .await
+        .await
         .ok()
         .flatten()
         .unwrap_or_default();
     let transit_key_name = crate::bindings::wasi::config::store::get("kms_key_name".to_string())
-            .await
+        .await
         .ok()
         .flatten()
         .unwrap_or_else(|| "lattice-id-master".to_string());
@@ -173,7 +173,8 @@ fn derive_dek(master: &[u8; 32], context: &str, version: u32) -> [u8; 32] {
     let salt = format!("lattice-id-vault-dek-v{version}");
     let hk = Hkdf::<Sha256>::new(Some(salt.as_bytes()), master);
     let mut dek = [0u8; 32];
-    hk.expand(context.as_bytes(), &mut dek).expect("hkdf expand");
+    hk.expand(context.as_bytes(), &mut dek)
+        .expect("hkdf expand");
     dek
 }
 
@@ -254,7 +255,7 @@ pub async fn rotate_master() -> Result<u32, VaultError> {
     let table = vault_table();
 
     let kms_endpoint = crate::bindings::wasi::config::store::get("kms_endpoint".to_string())
-            .await
+        .await
         .ok()
         .flatten()
         .unwrap_or_default();
@@ -265,15 +266,16 @@ pub async fn rotate_master() -> Result<u32, VaultError> {
             .map_err(|e| VaultError::Internal(format!("random: {e}")))?;
 
         let kms_token = crate::bindings::wasi::config::store::get("kms_token".to_string())
-                .await
+            .await
             .ok()
             .flatten()
             .unwrap_or_default();
-        let transit_key_name = crate::bindings::wasi::config::store::get("kms_key_name".to_string())
+        let transit_key_name =
+            crate::bindings::wasi::config::store::get("kms_key_name".to_string())
                 .await
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| "lattice-id-master".to_string());
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "lattice-id-master".to_string());
         let encrypt_url = format!("{kms_endpoint}/v1/transit/encrypt/{transit_key_name}");
 
         let new_key_b64 = B64.encode(new_key);

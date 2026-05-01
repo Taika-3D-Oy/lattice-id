@@ -593,7 +593,10 @@ const LDB_TCP_PORT: u16 = 4080;
 
 /// Send a JSON request to lattice-db via localhost TCP.
 /// Wire protocol: 4-byte BE length prefix + JSON body (with `_op` field).
-pub(crate) async fn ldb_request(op: &str, payload: &serde_json::Value) -> Result<serde_json::Value, String> {
+pub(crate) async fn ldb_request(
+    op: &str,
+    payload: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
     use crate::bindings::wasi::sockets::types::{
         IpAddressFamily, IpSocketAddress, Ipv4SocketAddress, TcpSocket,
     };
@@ -821,8 +824,7 @@ pub(crate) async fn kv_create_raw(
     ttl_secs: Option<u64>,
 ) -> Result<(), String> {
     let value_b64 = B64.encode(value);
-    let mut payload =
-        serde_json::json!({ "table": store_name, "key": key, "value": value_b64 });
+    let mut payload = serde_json::json!({ "table": store_name, "key": key, "value": value_b64 });
     if let Some(ttl) = ttl_secs {
         payload
             .as_object_mut()
@@ -855,7 +857,10 @@ pub(crate) async fn kv_cas_raw(
 pub(crate) async fn kv_exists(store_name: &str, key: &str) -> Result<bool, String> {
     let payload = serde_json::json!({ "table": store_name, "key": key });
     match ldb_request("exists", &payload).await {
-        Ok(resp) => Ok(resp.get("exists").and_then(|v| v.as_bool()).unwrap_or(false)),
+        Ok(resp) => Ok(resp
+            .get("exists")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)),
         Err(e) => Err(e),
     }
 }
