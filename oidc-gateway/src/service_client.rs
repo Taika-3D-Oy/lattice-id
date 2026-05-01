@@ -81,16 +81,14 @@ pub async fn verify_token_scoped(
     Ok(claims)
 }
 
-/// Get the JWKS (public keys) — now loaded directly from KV.
+/// Get the JWKS (public keys) — loaded directly from local key manager.
 pub async fn get_jwks() -> Result<Value, String> {
-    // Use get_public_keys() to return all keys (RS256 + ES256) in a single JWKS.
-    match crate::bindings::taika3d::lid::keys::get_public_keys().await {
+    match crate::key_manager::get_public_keys().await {
         Ok(keys_json) => {
             let keys: Vec<Value> =
                 serde_json::from_str(&keys_json).map_err(|e| format!("parse keys: {e}"))?;
             Ok(serde_json::json!({ "keys": keys }))
         }
-        // Fall back to single-key path (key-manager not yet updated in older deploys)
         Err(_) => {
             let key_store = keys::KeyStore::load().await?;
             Ok(key_store.jwks())
@@ -98,36 +96,32 @@ pub async fn get_jwks() -> Result<Value, String> {
     }
 }
 
-/// Check rate limit via the imported abuse protection component.
+/// Check rate limit via the inlined abuse module.
 /// Returns (allowed, remaining).
 pub async fn check_rate(key: &str, limit: u64, window_secs: u64) -> Result<(bool, u64), String> {
-    crate::bindings::taika3d::lid::abuse::check_rate(key.to_string(), limit, window_secs).await
+    crate::abuse::check_rate(key, limit, window_secs).await
 }
 
 // ── Envelope encryption helpers ──────────────────────────────
 
-/// Encrypt `plaintext` bound to `context` (AAD) via the crypto-vault component.
-///
-/// `context` must follow the convention "{bucket}:{key-prefix}" so ciphertext
-/// is bound to its storage location, e.g. `"lid-users:user"`.
+/// Encrypt `plaintext` bound to `context` (AAD) via the inlined vault module.
 pub async fn vault_encrypt(context: &str, plaintext: &[u8]) -> Result<Vec<u8>, String> {
-    crate::bindings::taika3d::lid::vault::encrypt(context.to_string(), plaintext.to_vec())
+    crate::vault::encrypt(context, plaintext)
         .await
-        .map_err(|e| format!("vault_encrypt({context}): {e:?}"))
+        .map_err(|e| format!("vault_encrypt({context}): {e}"))
 }
 
 /// Decrypt an envelope produced by `vault_encrypt`.
-/// `context` must exactly match the value used at encryption time.
 pub async fn vault_decrypt(context: &str, ciphertext: &[u8]) -> Result<Vec<u8>, String> {
-    crate::bindings::taika3d::lid::vault::decrypt(context.to_string(), ciphertext.to_vec())
+    crate::vault::decrypt(context, ciphertext)
         .await
-        .map_err(|e| format!("vault_decrypt({context}): {e:?}"))
+        .map_err(|e| format!("vault_decrypt({context}): {e}"))
 }
 
 /// Return the currently active vault key version (for monitoring).
 #[allow(dead_code)]
 pub fn vault_version() -> u32 {
-    crate::bindings::taika3d::lid::vault::current_version()
+    crate::vault::current_version()
 }
 
 pub async fn increment_metric(name: &str, labels: &[(&str, &str)]) -> Result<(), String> {
@@ -162,8 +156,8 @@ pub async fn lookup_region(email_hash: &str) -> Result<Option<String>, String> {
         return Ok(region);
     }
 
-    // 2. Check local NATS KV via authority component
-    let local = crate::bindings::taika3d::lid::authority::lookup(email_hash.to_string()).await?;
+    // 2. Check local region via inlined region authority
+    let local = crate::region_authority::lookup(email_hash).await?;
     if local.found {
         let region = local.region;
         let _ = crate::store::kv_cache_set(&cache_key, &region, 3600).await;

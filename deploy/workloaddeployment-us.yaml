@@ -30,18 +30,6 @@ spec:
         - name: email-worker
           image: kind-registry:5000/lattice-id/email-worker:dev
           maxInvocations: 10
-        - name: abuse-protection
-          image: kind-registry:5000/lattice-id/abuse-protection:dev
-          maxInvocations: 100
-        - name: key-manager
-          image: kind-registry:5000/lattice-id/key-manager:dev
-          maxInvocations: 100
-        - name: region-authority
-          image: kind-registry:5000/lattice-id/region-authority:dev
-          maxInvocations: 100
-        - name: crypto-vault
-          image: kind-registry:5000/lattice-id/crypto-vault:dev
-          maxInvocations: 100
         - name: admin-ui-host
           image: kind-registry:5000/lattice-id/admin-ui-host:dev
           maxInvocations: 100

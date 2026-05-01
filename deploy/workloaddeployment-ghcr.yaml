@@ -35,22 +35,6 @@ spec:
         - name: email-worker
           image: ghcr.io/taika-3d-oy/lattice-id/email-worker:latest
           maxInvocations: 10
-        - name: abuse-protection
-          image: ghcr.io/taika-3d-oy/lattice-id/abuse-protection:latest
-          maxInvocations: 100
-        - name: key-manager
-          image: ghcr.io/taika-3d-oy/lattice-id/key-manager:latest
-          maxInvocations: 100
-        - name: region-authority
-          image: ghcr.io/taika-3d-oy/lattice-id/region-authority:latest
-          maxInvocations: 100
-        - name: crypto-vault
-          image: ghcr.io/taika-3d-oy/lattice-id/crypto-vault:latest
-          maxInvocations: 100
-          localResources:
-            environment:
-              config:
-                kms_dev_seed: "lattice-id-local-dev-seed-change-before-production"
         - name: admin-ui-host
           image: ghcr.io/taika-3d-oy/lattice-id/admin-ui-host:latest
           maxInvocations: 100

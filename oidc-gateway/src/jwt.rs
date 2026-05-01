@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Sign a set of claims as an RS256 JWT using the imported key-manager.
 pub async fn sign(claims: &serde_json::Value) -> Result<String, String> {
-    let kid = crate::bindings::taika3d::lid::keys::get_kid().await?;
+    let kid = crate::key_manager::get_kid().await?;
 
     let header = serde_json::json!({
         "alg": "RS256",
@@ -19,7 +19,7 @@ pub async fn sign(claims: &serde_json::Value) -> Result<String, String> {
     let p = URL_SAFE_NO_PAD
         .encode(serde_json::to_vec(claims).map_err(|e| format!("claims encode: {e}"))?);
 
-    let s = crate::bindings::taika3d::lid::keys::sign_jwt(h.clone(), p.clone()).await?;
+    let s = crate::key_manager::sign_jwt(h.clone(), p.clone()).await?;
 
     Ok(format!("{h}.{p}.{s}"))
 }
@@ -27,7 +27,7 @@ pub async fn sign(claims: &serde_json::Value) -> Result<String, String> {
 /// Sign a set of claims as an ES256 JWT using the imported key-manager.
 pub async fn sign_es256(claims: &serde_json::Value) -> Result<String, String> {
     // Fetch the EC kid from the JWKS (second key in the array)
-    let keys_json = crate::bindings::taika3d::lid::keys::get_public_keys().await?;
+    let keys_json = crate::key_manager::get_public_keys().await?;
     let keys: Vec<serde_json::Value> =
         serde_json::from_str(&keys_json).map_err(|e| format!("parse keys: {e}"))?;
     let ec_kid = keys
@@ -49,7 +49,7 @@ pub async fn sign_es256(claims: &serde_json::Value) -> Result<String, String> {
     let p = URL_SAFE_NO_PAD
         .encode(serde_json::to_vec(claims).map_err(|e| format!("claims encode: {e}"))?);
 
-    let s = crate::bindings::taika3d::lid::keys::sign_jwt(h.clone(), p.clone()).await?;
+    let s = crate::key_manager::sign_jwt(h.clone(), p.clone()).await?;
 
     Ok(format!("{h}.{p}.{s}"))
 }

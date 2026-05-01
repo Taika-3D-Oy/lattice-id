@@ -725,15 +725,18 @@ dependencies = [
 name = "oidc-gateway"
 version = "1.4.0"
 dependencies = [
+ "aes-gcm",
  "base64 0.22.1",
  "bytes",
  "ciborium",
  "getrandom",
+ "hkdf",
  "hmac",
  "http",
  "http-body",
  "num-bigint-dig",
  "p256",
+ "rand_core",
  "rhai",
  "rsa",
  "serde",

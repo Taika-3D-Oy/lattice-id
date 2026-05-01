@@ -593,7 +593,7 @@ const LDB_TCP_PORT: u16 = 4080;
 
 /// Send a JSON request to lattice-db via localhost TCP.
 /// Wire protocol: 4-byte BE length prefix + JSON body (with `_op` field).
-async fn ldb_request(op: &str, payload: &serde_json::Value) -> Result<serde_json::Value, String> {
+pub(crate) async fn ldb_request(op: &str, payload: &serde_json::Value) -> Result<serde_json::Value, String> {
     use crate::bindings::wasi::sockets::types::{
         IpAddressFamily, IpSocketAddress, Ipv4SocketAddress, TcpSocket,
     };
@@ -734,7 +734,7 @@ async fn kv_get<T: serde::de::DeserializeOwned>(
     }
 }
 
-async fn kv_get_raw(store_name: &str, key: &str) -> Result<Option<Vec<u8>>, String> {
+pub(crate) async fn kv_get_raw(store_name: &str, key: &str) -> Result<Option<Vec<u8>>, String> {
     let payload = serde_json::json!({ "table": store_name, "key": key });
     match ldb_request("get", &payload).await {
         Ok(resp) => {
@@ -746,6 +746,28 @@ async fn kv_get_raw(store_name: &str, key: &str) -> Result<Option<Vec<u8>>, Stri
                 .decode(value_b64)
                 .map_err(|e| format!("base64 decode: {e}"))?;
             Ok(Some(bytes))
+        }
+        Err(e) if is_not_found(&e) => Ok(None),
+        Err(e) => Err(format!("get {key}: {e}")),
+    }
+}
+
+pub(crate) async fn kv_get_raw_with_revision(
+    store_name: &str,
+    key: &str,
+) -> Result<Option<(Vec<u8>, u64)>, String> {
+    let payload = serde_json::json!({ "table": store_name, "key": key });
+    match ldb_request("get", &payload).await {
+        Ok(resp) => {
+            let value_b64 = resp
+                .get("value")
+                .and_then(|v| v.as_str())
+                .ok_or("missing value")?;
+            let bytes = B64
+                .decode(value_b64)
+                .map_err(|e| format!("base64 decode: {e}"))?;
+            let revision = resp.get("revision").and_then(|v| v.as_u64()).unwrap_or(0);
+            Ok(Some((bytes, revision)))
         }
         Err(e) if is_not_found(&e) => Ok(None),
         Err(e) => Err(format!("get {key}: {e}")),
@@ -784,11 +806,58 @@ pub async fn kv_set<T: Serialize>(store_name: &str, key: &str, value: &T) -> Res
     Ok(())
 }
 
-async fn kv_set_raw(store_name: &str, key: &str, value: &[u8]) -> Result<(), String> {
+pub(crate) async fn kv_set_raw(store_name: &str, key: &str, value: &[u8]) -> Result<(), String> {
     let value_b64 = B64.encode(value);
     let payload = serde_json::json!({ "table": store_name, "key": key, "value": value_b64 });
     ldb_request("put", &payload).await?;
     Ok(())
+}
+
+/// Atomic create — returns Err containing "already exists" if key is present.
+pub(crate) async fn kv_create_raw(
+    store_name: &str,
+    key: &str,
+    value: &[u8],
+    ttl_secs: Option<u64>,
+) -> Result<(), String> {
+    let value_b64 = B64.encode(value);
+    let mut payload =
+        serde_json::json!({ "table": store_name, "key": key, "value": value_b64 });
+    if let Some(ttl) = ttl_secs {
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert("ttl_seconds".into(), ttl.into());
+    }
+    ldb_request("create", &payload).await?;
+    Ok(())
+}
+
+/// CAS update — returns Err containing "revision mismatch" if revision is stale.
+pub(crate) async fn kv_cas_raw(
+    store_name: &str,
+    key: &str,
+    value: &[u8],
+    revision: u64,
+) -> Result<(), String> {
+    let value_b64 = B64.encode(value);
+    let payload = serde_json::json!({
+        "table": store_name,
+        "key": key,
+        "value": value_b64,
+        "revision": revision,
+    });
+    ldb_request("cas", &payload).await?;
+    Ok(())
+}
+
+/// Check whether a key exists (without fetching the value).
+pub(crate) async fn kv_exists(store_name: &str, key: &str) -> Result<bool, String> {
+    let payload = serde_json::json!({ "table": store_name, "key": key });
+    match ldb_request("exists", &payload).await {
+        Ok(resp) => Ok(resp.get("exists").and_then(|v| v.as_bool()).unwrap_or(false)),
+        Err(e) => Err(e),
+    }
 }
 
 async fn kv_set_with_ttl(
@@ -919,15 +988,6 @@ async fn kv_list_keys(store_name: &str) -> Result<Vec<String>, String> {
         }
     }
     Ok(all_keys)
-}
-
-async fn kv_exists(store_name: &str, key: &str) -> Result<bool, String> {
-    let payload = serde_json::json!({ "table": store_name, "key": key });
-    let resp = ldb_request("exists", &payload).await?;
-    Ok(resp
-        .get("exists")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false))
 }
 
 /// Atomically swap a value if the revision matches.
@@ -1172,7 +1232,7 @@ pub async fn get_user_by_email(email: &str) -> Result<Option<User>, String> {
     // If authority says user is remote, return None so the caller can
     // attempt a cross-region redirect.  Otherwise (local or unknown),
     // fall through to the local KV lookup.
-    let lookup = crate::bindings::taika3d::lid::authority::lookup(email_lower.clone())
+    let lookup = crate::region_authority::lookup(&email_lower)
         .await
         .map_err(|e| format!("authority lookup failed: {}", e))?;
 

@@ -7,8 +7,4 @@ world gateway {
     import wasi:sockets/types@0.3.0-rc-2026-03-15;
     import wasmcloud:messaging/consumer@0.2.0;
     import lattice-id:notify/email;
-    import taika3d:lid/abuse;
-    import taika3d:lid/keys;
-    import taika3d:lid/authority;
-    import taika3d:lid/vault;
 }

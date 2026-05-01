@@ -30,7 +30,7 @@ pub struct KeyStore {
 impl KeyStore {
     /// Load signing keys from the key-manager component (JWK string cached).
     pub async fn load() -> Result<Self, String> {
-        let jwk_str = crate::bindings::taika3d::lid::keys::get_public_key().await?;
+        let jwk_str = crate::key_manager::get_public_key().await?;
         let jwk: serde_json::Value = serde_json::from_str(&jwk_str).map_err(|e| e.to_string())?;
 
         let n_b64 = jwk
