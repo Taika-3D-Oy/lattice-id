@@ -84,7 +84,7 @@ pub async fn verify_token_scoped(
 /// Get the JWKS (public keys) — now loaded directly from KV.
 pub async fn get_jwks() -> Result<Value, String> {
     // Use get_public_keys() to return all keys (RS256 + ES256) in a single JWKS.
-    match crate::bindings::taika3d::lid::keys::get_public_keys() {
+    match crate::bindings::taika3d::lid::keys::get_public_keys().await {
         Ok(keys_json) => {
             let keys: Vec<Value> =
                 serde_json::from_str(&keys_json).map_err(|e| format!("parse keys: {e}"))?;
@@ -101,7 +101,7 @@ pub async fn get_jwks() -> Result<Value, String> {
 /// Check rate limit via the imported abuse protection component.
 /// Returns (allowed, remaining).
 pub async fn check_rate(key: &str, limit: u64, window_secs: u64) -> Result<(bool, u64), String> {
-    crate::bindings::taika3d::lid::abuse::check_rate(key, limit, window_secs)
+    crate::bindings::taika3d::lid::abuse::check_rate(key.to_string(), limit, window_secs).await
 }
 
 // ── Envelope encryption helpers ──────────────────────────────
@@ -111,14 +111,16 @@ pub async fn check_rate(key: &str, limit: u64, window_secs: u64) -> Result<(bool
 /// `context` must follow the convention "{bucket}:{key-prefix}" so ciphertext
 /// is bound to its storage location, e.g. `"lid-users:user"`.
 pub async fn vault_encrypt(context: &str, plaintext: &[u8]) -> Result<Vec<u8>, String> {
-    crate::bindings::taika3d::lid::vault::encrypt(context, plaintext)
+    crate::bindings::taika3d::lid::vault::encrypt(context.to_string(), plaintext.to_vec())
+        .await
         .map_err(|e| format!("vault_encrypt({context}): {e:?}"))
 }
 
 /// Decrypt an envelope produced by `vault_encrypt`.
 /// `context` must exactly match the value used at encryption time.
 pub async fn vault_decrypt(context: &str, ciphertext: &[u8]) -> Result<Vec<u8>, String> {
-    crate::bindings::taika3d::lid::vault::decrypt(context, ciphertext)
+    crate::bindings::taika3d::lid::vault::decrypt(context.to_string(), ciphertext.to_vec())
+        .await
         .map_err(|e| format!("vault_decrypt({context}): {e:?}"))
 }
 
@@ -161,7 +163,7 @@ pub async fn lookup_region(email_hash: &str) -> Result<Option<String>, String> {
     }
 
     // 2. Check local NATS KV via authority component
-    let local = crate::bindings::taika3d::lid::authority::lookup(email_hash)?;
+    let local = crate::bindings::taika3d::lid::authority::lookup(email_hash.to_string()).await?;
     if local.found {
         let region = local.region;
         let _ = crate::store::kv_cache_set(&cache_key, &region, 3600).await;

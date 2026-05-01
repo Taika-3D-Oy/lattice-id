@@ -8,6 +8,17 @@ pub mod bindings {
             "import:wasi:sockets/types@0.3.0-rc-2026-03-15#[method]tcp-socket.connect",
             "import:wasmcloud:messaging/consumer@0.2.0#request",
             "import:wasmcloud:messaging/consumer@0.2.0#publish",
+            // Cross-component calls — these components now do async TCP internally
+            "import:taika3d:lid/abuse#check-rate",
+            "import:taika3d:lid/abuse#record-metric",
+            "import:taika3d:lid/keys#get-public-key",
+            "import:taika3d:lid/keys#get-public-keys",
+            "import:taika3d:lid/keys#get-kid",
+            "import:taika3d:lid/keys#sign-jwt",
+            "import:taika3d:lid/authority#lookup",
+            "import:taika3d:lid/vault#encrypt",
+            "import:taika3d:lid/vault#decrypt",
+            "import:taika3d:lid/vault#rotate-master",
         ],
         generate_all,
     });

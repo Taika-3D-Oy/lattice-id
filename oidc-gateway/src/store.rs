@@ -1172,7 +1172,8 @@ pub async fn get_user_by_email(email: &str) -> Result<Option<User>, String> {
     // If authority says user is remote, return None so the caller can
     // attempt a cross-region redirect.  Otherwise (local or unknown),
     // fall through to the local KV lookup.
-    let lookup = crate::bindings::taika3d::lid::authority::lookup(&email_lower)
+    let lookup = crate::bindings::taika3d::lid::authority::lookup(email_lower.clone())
+        .await
         .map_err(|e| format!("authority lookup failed: {}", e))?;
 
     match lookup.region.as_deref() {
