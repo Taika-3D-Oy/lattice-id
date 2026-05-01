@@ -11,8 +11,8 @@ interface abuse {
     /// Returns:
     ///   allowed     — true if request is allowed, false if rate limited
     ///   remaining   — number of requests remaining in the current window
-    check-rate: func(key: string, limit: u64, window-secs: u64) -> result<tuple<bool, u64>, string>;
+    check-rate: async func(key: string, limit: u64, window-secs: u64) -> result<tuple<bool, u64>, string>;
 
     /// Record a metric event.
-    record-metric: func(name: string, labels: list<tuple<string, string>>) -> result<_, string>;
+    record-metric: async func(name: string, labels: list<tuple<string, string>>) -> result<_, string>;
 }

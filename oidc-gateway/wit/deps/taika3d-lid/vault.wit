@@ -26,11 +26,11 @@ interface vault {
 
     /// Encrypt `plaintext` and bind it to `context` (AAD).
     /// Returns a versioned envelope: [v:u8][nonce:12][ct+tag:rest].
-    encrypt: func(context: string, plaintext: list<u8>) -> result<list<u8>, vault-error>;
+    encrypt: async func(context: string, plaintext: list<u8>) -> result<list<u8>, vault-error>;
 
     /// Decrypt an envelope previously produced by `encrypt`.
     /// `context` must exactly match the value used during encryption.
-    decrypt: func(context: string, ciphertext: list<u8>) -> result<list<u8>, vault-error>;
+    decrypt: async func(context: string, ciphertext: list<u8>) -> result<list<u8>, vault-error>;
 
     /// Return the currently active key version (monotonically increasing u32).
     /// Useful for monitoring and lazy re-encryption jobs.
@@ -38,5 +38,5 @@ interface vault {
 
     /// Rotate the master key.  All new encryptions will use the new version;
     /// old ciphertexts remain decryptable.  Returns the new version number.
-    rotate-master: func() -> result<u32, vault-error>;
+    rotate-master: async func() -> result<u32, vault-error>;
 }

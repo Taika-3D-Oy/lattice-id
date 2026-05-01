@@ -6,5 +6,5 @@ interface authority {
         region: option<string>,
     }
 
-    lookup: func(email-hash: string) -> result<lookup-result, string>;
+    lookup: async func(email-hash: string) -> result<lookup-result, string>;
 }

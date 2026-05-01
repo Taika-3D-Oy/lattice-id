@@ -2,18 +2,18 @@ package taika3d:lid;
 
 interface keys {
     /// Get the current RSA public key in JWK format (RS256).
-    get-public-key: func() -> result<string, string>;
+    get-public-key: async func() -> result<string, string>;
 
     /// Get all active public keys as a JSON array of JWK objects.
     /// Includes both RS256 and ES256 keys.
-    get-public-keys: func() -> result<string, string>;
+    get-public-keys: async func() -> result<string, string>;
 
     /// Get the current Key ID (KID).
-    get-kid: func() -> result<string, string>;
+    get-kid: async func() -> result<string, string>;
 
     /// Sign a message using the private key indicated by the `alg` field
     /// in the base64url-encoded `header` parameter.
     /// RS256 and ES256 are supported.
     /// Returns the signature as a base64url-encoded string (JWS signature part).
-    sign-jwt: func(header: string, payload: string) -> result<string, string>;
+    sign-jwt: async func(header: string, payload: string) -> result<string, string>;
 }
