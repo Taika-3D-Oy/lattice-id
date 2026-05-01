@@ -78,7 +78,6 @@ async fn ldb_request(op: &str, payload: &serde_json::Value) -> Result<serde_json
     if !remaining.is_empty() {
         return Err("tcp send failed".into());
     }
-    drop(tx);
 
     let mut buf = Vec::new();
     while buf.len() < 4 {

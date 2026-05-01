@@ -646,7 +646,6 @@ pub(crate) async fn ldb_request(
     if !remaining.is_empty() {
         return Err("tcp send failed".into());
     }
-    drop(tx);
 
     // Read response frame: [4 bytes length][payload]
     let mut buf = Vec::new();
