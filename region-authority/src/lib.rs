@@ -76,13 +76,13 @@ async fn ldb_request(op: &str, payload: &serde_json::Value) -> Result<serde_json
     if !remaining.is_empty() {
         return Err("tcp send failed".into());
     }
-    drop(tx);
 
     let mut buf = Vec::new();
     while buf.len() < 4 {
         let read_buf = Vec::with_capacity(4096);
         let (status, data) = rx.read(read_buf).await;
         match status {
+            StreamResult::Complete(0) => return Err("tcp read failed (length eof)".into()),
             StreamResult::Complete(n) => buf.extend_from_slice(&data[..n]),
             _ => return Err("tcp read failed (length)".into()),
         }
@@ -94,6 +94,7 @@ async fn ldb_request(op: &str, payload: &serde_json::Value) -> Result<serde_json
         let read_buf = Vec::with_capacity(4096);
         let (status, data) = rx.read(read_buf).await;
         match status {
+            StreamResult::Complete(0) => return Err("tcp read failed (body eof)".into()),
             StreamResult::Complete(n) => buf.extend_from_slice(&data[..n]),
             _ => return Err("tcp read failed (body)".into()),
         }
