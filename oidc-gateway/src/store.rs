@@ -602,6 +602,10 @@ pub(crate) async fn ldb_request(
     };
     use wit_bindgen::StreamResult;
 
+    let table_hint = payload.get("table").and_then(|t| t.as_str()).unwrap_or("-");
+    let key_hint = payload.get("key").and_then(|k| k.as_str()).unwrap_or("-");
+    eprintln!("ldb_request: START op={op} table={table_hint} key={key_hint}");
+
     // Build payload with _op and consistency context.
     let mut payload = payload.clone();
     payload
@@ -621,6 +625,7 @@ pub(crate) async fn ldb_request(
 
     let body = serde_json::to_vec(&payload).map_err(|e| format!("serialize: {e}"))?;
 
+    eprintln!("ldb_request: [{op}] creating socket");
     // Connect to local lattice-db service.
     let socket =
         TcpSocket::create(IpAddressFamily::Ipv4).map_err(|e| format!("tcp create: {e:?}"))?;
@@ -628,10 +633,12 @@ pub(crate) async fn ldb_request(
         port: LDB_TCP_PORT,
         address: (127, 0, 0, 1),
     });
+    eprintln!("ldb_request: [{op}] connecting to 127.0.0.1:{LDB_TCP_PORT}");
     socket
         .connect(addr)
         .await
         .map_err(|e| format!("tcp connect: {e:?}"))?;
+    eprintln!("ldb_request: [{op}] connected");
 
     let (mut rx, _rx_done) = socket.receive();
     let (mut tx, tx_rx) = crate::bindings::wit_stream::new::<u8>();
@@ -642,16 +649,21 @@ pub(crate) async fn ldb_request(
     let mut frame = Vec::with_capacity(4 + body.len());
     frame.extend_from_slice(&len_bytes);
     frame.extend_from_slice(&body);
+    eprintln!("ldb_request: [{op}] writing {} bytes", frame.len());
     let remaining = tx.write_all(frame).await;
     if !remaining.is_empty() {
+        eprintln!("ldb_request: [{op}] WRITE FAILED remaining={}", remaining.len());
         return Err("tcp send failed".into());
     }
+    eprintln!("ldb_request: [{op}] write complete, reading response length");
 
     // Read response frame: [4 bytes length][payload]
     let mut buf = Vec::new();
     while buf.len() < 4 {
         let read_buf = Vec::with_capacity(4096);
+        eprintln!("ldb_request: [{op}] rx.read() for length (have {} bytes)", buf.len());
         let (status, data) = rx.read(read_buf).await;
+        eprintln!("ldb_request: [{op}] rx.read() returned status={status:?} data_len={}", data.len());
         match status {
             StreamResult::Complete(0) => return Err("tcp read failed (length eof)".into()),
             StreamResult::Complete(n) => buf.extend_from_slice(&data[..n]),
@@ -660,6 +672,7 @@ pub(crate) async fn ldb_request(
     }
     let resp_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
     buf.drain(..4);
+    eprintln!("ldb_request: [{op}] got length prefix: {resp_len} bytes expected");
 
     while buf.len() < resp_len {
         let read_buf = Vec::with_capacity(4096);
@@ -670,6 +683,7 @@ pub(crate) async fn ldb_request(
             _ => return Err("tcp read failed (body)".into()),
         }
     }
+    eprintln!("ldb_request: [{op}] response body read complete ({resp_len} bytes)");
 
     let val: serde_json::Value =
         serde_json::from_slice(&buf[..resp_len]).map_err(|e| format!("parse response: {e}"))?;

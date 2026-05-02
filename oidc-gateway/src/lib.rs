@@ -113,7 +113,9 @@ async fn handle_request(
     req: http::Request<IncomingRequestBody>,
 ) -> Result<Response<String>, String> {
     // Load config values (cached for this request)
+    eprintln!("handle_request: init_config START");
     store::init_config().await;
+    eprintln!("handle_request: init_config DONE");
 
     // ── Session consistency: seed from inbound header or cookie ──
     // Header `x-lid-consistency` takes priority (API clients).
@@ -290,14 +292,17 @@ async fn handle(
     }
 
     // IP-based rate limiting (only for endpoints that actually need protection).
-    if remote_ip != "unknown"
-        && let Ok((false, _)) =
+    if remote_ip != "unknown" {
+        eprintln!("handle: rate_limit START for ip={remote_ip} path={route_path}");
+        if let Ok((false, _)) =
             service_client::check_rate(&format!("ip:{}", remote_ip), 1000, 3600).await
-    {
-        return Ok(error_json(
-            StatusCode::TOO_MANY_REQUESTS,
-            "IP rate limit exceeded",
-        ));
+        {
+            return Ok(error_json(
+                StatusCode::TOO_MANY_REQUESTS,
+                "IP rate limit exceeded",
+            ));
+        }
+        eprintln!("handle: rate_limit DONE for path={route_path}");
     }
 
     let auth = parts
