@@ -653,6 +653,7 @@ pub(crate) async fn ldb_request(
         let read_buf = Vec::with_capacity(4096);
         let (status, data) = rx.read(read_buf).await;
         match status {
+            StreamResult::Complete(0) => return Err("tcp read failed (length eof)".into()),
             StreamResult::Complete(n) => buf.extend_from_slice(&data[..n]),
             _ => return Err("tcp read failed (length)".into()),
         }
@@ -664,6 +665,7 @@ pub(crate) async fn ldb_request(
         let read_buf = Vec::with_capacity(4096);
         let (status, data) = rx.read(read_buf).await;
         match status {
+            StreamResult::Complete(0) => return Err("tcp read failed (body eof)".into()),
             StreamResult::Complete(n) => buf.extend_from_slice(&data[..n]),
             _ => return Err("tcp read failed (body)".into()),
         }
