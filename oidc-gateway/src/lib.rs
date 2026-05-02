@@ -259,16 +259,6 @@ async fn handle(
     remote_ip: &str,
 ) -> Result<Response<String>, String> {
     let (parts, body) = req.into_parts();
-    // Task 2.6: IP-based rate limiting (global IP check)
-    if remote_ip != "unknown"
-        && let Ok((false, _)) =
-            service_client::check_rate(&format!("ip:{}", remote_ip), 1000, 3600).await
-    {
-        return Ok(error_json(
-            StatusCode::TOO_MANY_REQUESTS,
-            "IP rate limit exceeded",
-        ));
-    }
 
     let full_path = parts
         .uri
@@ -287,6 +277,29 @@ async fn handle(
 
     let query = full_path.split_once('?').map(|(_, q)| q).unwrap_or("");
     let issuer = get_issuer();
+
+    // Fast-return public discovery/health endpoints without rate-limit TCP call.
+    match route_path {
+        "/.well-known/openid-configuration" => {
+            return Ok(discovery::openid_configuration(&issuer));
+        }
+        "/.well-known/jwks.json" => return Ok(discovery::jwks().await),
+        "/version" => return Ok(version_response()),
+        "/healthz" => return Ok(healthz()),
+        _ => {}
+    }
+
+    // IP-based rate limiting (only for endpoints that actually need protection).
+    if remote_ip != "unknown"
+        && let Ok((false, _)) =
+            service_client::check_rate(&format!("ip:{}", remote_ip), 1000, 3600).await
+    {
+        return Ok(error_json(
+            StatusCode::TOO_MANY_REQUESTS,
+            "IP rate limit exceeded",
+        ));
+    }
+
     let auth = parts
         .headers
         .get("authorization")
@@ -299,7 +312,7 @@ async fn handle(
         (&Method::GET, "/metrics") => handle_metrics(auth).await,
         (&Method::GET, "/verify/email") => handle_email_verification(query).await,
 
-        // ── Discovery ───────────────────────────────────────
+        // ── Discovery (fast-path above, fallback here) ──────
         (&Method::GET, "/.well-known/openid-configuration") => {
             Ok(discovery::openid_configuration(&issuer))
         }
@@ -1309,6 +1322,19 @@ async fn allowed_origin(req_origin: Option<&str>) -> Option<String> {
     if origin.is_empty() {
         return None;
     }
+
+    // Fast path: allow the issuer's own origin without a DB round-trip.
+    // The admin UI and same-origin XHR always send this.
+    let issuer = get_issuer();
+    if let Some(pos) = issuer.find("://") {
+        let after_scheme = &issuer[pos + 3..];
+        let host_end = after_scheme.find('/').unwrap_or(after_scheme.len());
+        let issuer_origin = &issuer[..pos + 3 + host_end];
+        if origin == issuer_origin {
+            return Some(origin.to_string());
+        }
+    }
+
     let clients = store::list_clients().await.ok()?;
     for client in &clients {
         for uri in &client.redirect_uris {
