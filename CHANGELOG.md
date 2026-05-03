@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-05-03
+
+### Changed
+
+- **Removed satellite components**: `abuse-protection`, `key-manager`,
+  `region-authority`, and `crypto-vault` are no longer separate crates. Their
+  functionality has been consolidated into `oidc-gateway` (rate limiting, key
+  management, region lookup, and encryption all run inline via TCP to lattice-db).
+- **Co-located lattice-db service**: All deployment manifests now include
+  lattice-db as a co-located service inside the WorkloadDeployment (TCP on
+  `127.0.0.1:4080`). Separate `latticedb-{region}.yaml` manifests removed.
+- **Workspace reduced**: From 7 crates to 3 (`oidc-gateway`, `password-hasher`,
+  `email-worker`). `admin-ui` remains excluded (separate build).
+- **CI publish**: Only builds and pushes `oidc-gateway`, `password-hasher`,
+  `email-worker`, and `admin-ui-host`.
+
 ## [1.4.1] - 2026-05-02
 
 ### Fixed
