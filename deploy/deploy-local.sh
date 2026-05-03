@@ -10,7 +10,7 @@
 #
 # Usage:
 #   bash deploy/deploy-local.sh            # full setup from scratch
-#   bash deploy/deploy-local.sh rebuild    # rebuild + redeploy both workloads
+#   bash deploy/deploy-local.sh rebuild    # rebuild + redeploy the workload
 #   bash deploy/deploy-local.sh teardown   # destroy everything
 #   bash deploy/deploy-local.sh status     # show cluster status
 
@@ -312,7 +312,7 @@ deploy_nats_data
 # 8. Build and push all components
 build_and_push
 
-# 9. Deploy both workloads
+# 9. Deploy workload
 deploy_workloads
 
 # 9. Wait for health

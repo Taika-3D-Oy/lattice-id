@@ -10,7 +10,6 @@
 #   BASE_URL          — cluster URL (default: http://localhost:8000)
 #   KUBE_NS_FLAG      — kubectl namespace flag, e.g. "-n eu" (default: "")
 #   KUBE_CTX_FLAG     — kubectl context flag, e.g. "--context kind-lattice-id-eu" (default: "")
-#   LATTICE_DB_YAML   — path to lattice-db workload YAML (auto-detected)
 #   LATTICE_ID_YAML   — path to lattice-id workload YAML (auto-detected)
 #
 # Requires: kubectl configured for the target cluster, curl, python3.
@@ -32,16 +31,8 @@ BASE_URL="${BASE_URL:-http://localhost:8000}"
 export KUBE_NS_FLAG="${KUBE_NS_FLAG:-}"
 export KUBE_CTX_FLAG="${KUBE_CTX_FLAG:-}"
 
-# Auto-detect lattice-db and lattice-id YAML files from deploy/ directory.
+# Auto-detect lattice-id YAML file from deploy/ directory.
 auto_detect_yaml() {
-  if [[ -z "${LATTICE_DB_YAML:-}" ]]; then
-    for f in "$ROOT"/deploy/latticedb*.yaml; do
-      if [[ -f "$f" ]]; then
-        LATTICE_DB_YAML="$f"
-        break
-      fi
-    done
-  fi
   if [[ -z "${LATTICE_ID_YAML:-}" ]]; then
     for f in "$ROOT"/deploy/workloaddeployment*.yaml; do
       if [[ -f "$f" ]] && grep -q "lattice-id" "$f" 2>/dev/null; then
@@ -50,7 +41,6 @@ auto_detect_yaml() {
       fi
     done
   fi
-  log "Using lattice-db YAML: ${LATTICE_DB_YAML:-<not found>}"
   log "Using lattice-id YAML: ${LATTICE_ID_YAML:-<not found>}"
 }
 
@@ -75,16 +65,7 @@ reset_cluster() {
   kubectl ${KUBE_CTX_FLAG} rollout status deploy/hostgroup-default ${KUBE_NS_FLAG} --timeout=60s >/dev/null
   sleep 10
 
-  # Re-deploy lattice-db first — it needs to recreate KV buckets on fresh NATS.
-  if [[ -n "${LATTICE_DB_YAML:-}" && -f "${LATTICE_DB_YAML}" ]]; then
-    kubectl ${KUBE_CTX_FLAG} apply -f "$LATTICE_DB_YAML" >/dev/null 2>&1
-    log "Waiting for lattice-db to initialize (30s)..."
-    sleep 30
-  else
-    log "Warning: no lattice-db YAML found, skipping lattice-db deploy"
-  fi
-
-  # Re-apply the lattice-id workload deployment.
+  # Re-apply the lattice-id workload deployment (lattice-db is co-located as a service).
   if [[ -n "${LATTICE_ID_YAML:-}" && -f "${LATTICE_ID_YAML}" ]]; then
     kubectl ${KUBE_CTX_FLAG} apply -f "$LATTICE_ID_YAML" >/dev/null
   else

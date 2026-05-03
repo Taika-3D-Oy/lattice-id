@@ -2,13 +2,7 @@
 
 Lattice-ID is a NATS-native OIDC provider for wasmCloud, backed by JetStream KV.
 
-Runs as a standard wasmCloud workload alongside your applications — no extra database, no separate infrastructure. Lattice-ID uses [lattice-db](https://github.com/Taika-3D-Oy/lattice-db) for all persistent state via NATS JetStream KV.
-
-## Maintainer notes
-
-Lattice-ID uses [lattice-db](https://github.com/Taika-3D-Oy/lattice-db) for all persistent state. lattice-db runs as a separate wasmCloud workload and provides NATS KV with CAS semantics over request/reply messaging (`wasmcloud:messaging`).
-
-All deployment files exist solely for testing and validating Lattice-ID locally.
+Runs as a single wasmCloud WorkloadDeployment with [lattice-db](https://github.com/Taika-3D-Oy/lattice-db) co-located as a service — no extra database, no separate infrastructure. Components communicate with lattice-db over localhost TCP (`127.0.0.1:4080`), and lattice-db persists all state to NATS JetStream KV.
 
 ## Status
 
@@ -22,12 +16,9 @@ All deployment files exist solely for testing and validating Lattice-ID locally.
 
 ## Workspace Layout
 
-- `oidc-gateway`: HTTP OIDC surface, management API, and embedded admin UI serving
-- `password-hasher`: Argon2id worker (SIMD-accelerated)
-- `email-worker`: email delivery (log for dev, AWS SES for production)
-- `abuse-protection`: rate limiting and account lockout
-- `key-manager`: RSA signing key persistence
-- `region-authority`: home-region lookup for multi-region deployments
+- `oidc-gateway`: HTTP OIDC surface, management API, rate limiting, key management, region routing, and admin UI serving
+- `password-hasher`: Argon2id worker (SIMD-accelerated, imported via WIT)
+- `email-worker`: email delivery (log for dev, AWS SES for production, imported via WIT)
 - `admin-ui`: optional Leptos admin UI (builds separately with Trunk)
 - `admin-ui/host`: WASI component that embeds the admin UI dist and serves via the gateway
 
@@ -61,10 +52,9 @@ This script:
 - Creates a Kind cluster with a local OCI registry
 - Installs the wasmCloud operator via Helm
 - Deploys a standalone NATS JetStream data-plane (`nats-data`)
-- Builds and pushes lattice-id wasm components
-- Deploys lattice-db from GHCR (override with `LATTICE_DB_IMAGE=...`)
-- Deploys both as WorkloadDeployments
-- Exposes the HTTP gateway on `http://localhost:8000`
+- Builds and pushes lattice-id wasm components (mirrors lattice-db from GHCR)
+- Deploys a single WorkloadDeployment with lattice-db co-located as a service
+- Exposes the HTTP gateway on `http://localhost`
 
 Other commands:
 

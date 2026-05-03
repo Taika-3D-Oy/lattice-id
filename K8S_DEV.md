@@ -43,9 +43,7 @@ Pushing the wrong filename (e.g. a stale 13KB artifact) produces a cryptic "Serv
 
 ### Data layer: lattice-db
 
-All persistent state is stored via [lattice-db](https://crates.io/crates/lattice-db-client), a separate wasmCloud workload that provides NATS KV with CAS semantics over NATS request/reply messaging.
-
-Components use `wasmcloud:messaging/consumer` to send requests to lattice-db, which subscribes to `lid.>` subjects. lattice-db is backed by NATS JetStream KV.
+All persistent state is stored via [lattice-db](https://github.com/Taika-3D-Oy/lattice-db), which runs as a co-located service inside the same WorkloadDeployment. Components talk to lattice-db over localhost TCP (`127.0.0.1:4080`). lattice-db persists data to NATS JetStream KV.
 
 ### KV bucket naming
 
@@ -143,7 +141,7 @@ bash deploy/deploy-local.sh rebuild
 ```
 
 This rebuilds all wasm components, pushes them to the local registry, clears
-the OCI cache on host pods, and bounces both workloads.
+the OCI cache on host pods, and redeploys the workload.
 
 For manual redeployment (e.g. single component), the steps are:
 
@@ -207,7 +205,7 @@ bash deploy/deploy-local.sh rebuild
 ```
 
 This rebuilds all wasm components, pushes to the local registry, clears the
-OCI cache on host pods, and redeploys both workloads.
+OCI cache on host pods, and redeploys the workload.
 
 ---
 
