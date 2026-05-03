@@ -3,10 +3,6 @@ members = [
     "password-hasher",
     "oidc-gateway",
     "email-worker",
-    "abuse-protection",
-    "key-manager",
-    "region-authority",
-    "crypto-vault",
 ]
 exclude = [
     "admin-ui",

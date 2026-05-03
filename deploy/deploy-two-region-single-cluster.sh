@@ -55,12 +55,6 @@ build_and_push() {
     target/wasm32-wasip3/release/password_hasher.wasm
   wash oci push --insecure "localhost:${REGISTRY_PORT}/lattice-id/email-worker:dev" \
     target/wasm32-wasip3/release/email_worker.wasm
-  wash oci push --insecure "localhost:${REGISTRY_PORT}/lattice-id/abuse-protection:dev" \
-    target/wasm32-wasip3/release/abuse_protection.wasm
-  wash oci push --insecure "localhost:${REGISTRY_PORT}/lattice-id/key-manager:dev" \
-    target/wasm32-wasip3/release/key_manager.wasm
-  wash oci push --insecure "localhost:${REGISTRY_PORT}/lattice-id/region-authority:dev" \
-    target/wasm32-wasip3/release/region_authority.wasm
 }
 
 if [[ "${1:-}" == "rebuild" ]]; then

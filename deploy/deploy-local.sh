@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
-# deploy-local.sh — Deploy lattice-id + lattice-db on a single Kind cluster
+# deploy-local.sh — Deploy lattice-id on a single Kind cluster
 # with shared NATS for integration testing.
 #
-# Both workloads run as wasmCloud WorkloadDeployments on the same cluster:
-#   - lattice-db:  storage-service subscribes to ldb.> (NATS request/reply)
-#   - lattice-id:  oidc-gateway + satellites use wasmcloud:messaging to reach ldb
-#
-# NATS (with JetStream) is provided by the wasmCloud Helm chart.
+# The lattice-id workload runs as a wasmCloud WorkloadDeployment with
+# lattice-db co-located as a service (TCP on 127.0.0.1:4080).
+# NATS (with JetStream) provides persistent storage for lattice-db.
 # The HTTP gateway is exposed on localhost:8000.
 # NATS client port is exposed on localhost:4222 for CLI testing.
 #
@@ -25,8 +23,8 @@ REGISTRY_NAME="kind-registry"
 REGISTRY_PORT=5001
 HELM_VERSION="2.0.1"
 
-# lattice-db image source (override if you want a pinned version)
-LATTICE_DB_IMAGE="${LATTICE_DB_IMAGE:-ghcr.io/taika-3d-oy/lattice-db/storage-service:v1.6.1}"
+# lattice-db image source for mirroring into local registry
+LATTICE_DB_IMAGE="${LATTICE_DB_IMAGE:-ghcr.io/taika-3d-oy/lattice-db/storage-service:latest}"
 
 log() { echo "==> $*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -86,7 +84,7 @@ build_and_push() {
   log "Pushing components to local OCI registry"
 
   # lattice-id components
-  local components=(oidc-gateway password-hasher email-worker abuse-protection key-manager region-authority crypto-vault)
+  local components=(oidc-gateway password-hasher email-worker)
 
   for comp in "${components[@]}"; do
     local wasm="${comp//-/_}"
@@ -178,71 +176,7 @@ EOF
 # ── Deploy workloads ─────────────────────────────────────────
 
 deploy_workloads() {
-  local nats_ip
-  nats_ip=$(kubectl get svc nats-data -o jsonpath='{.spec.clusterIP}')
-
-  log "Deploying lattice-db from local registry (mirrored from ${LATTICE_DB_IMAGE})"
-  python3 - "$nats_ip" "kind-registry:5000/lattice-db/storage-service:dev" <<'PYEOF'
-import sys, json
-
-nats_ip = sys.argv[1]
-lattice_db_image = sys.argv[2]
-
-doc = {
-    "apiVersion": "runtime.wasmcloud.dev/v1alpha1",
-    "kind": "WorkloadDeployment",
-    "metadata": {
-        "name": "lattice-db",
-        "annotations": {"description": "lattice-db storage service"}
-    },
-    "spec": {
-        "replicas": 1,
-        "deployPolicy": "RollingUpdate",
-        "template": {
-            "labels": {
-                "app.kubernetes.io/name": "lattice-db",
-                "app.kubernetes.io/component": "storage"
-            },
-            "spec": {
-                "components": [],
-                "service": {
-                  "image": lattice_db_image,
-                    "maxRestarts": 5,
-                    "localResources": {
-                        "environment": {
-                            "config": {
-                                "NATS_URL": nats_ip + ":4222",
-                                "LDB_INSTANCE": "lid",
-                                "LDB_CONSISTENCY_WATCHER_WAIT_STEPS": "2",
-                                "LDB_CONSISTENCY_WATCHER_WAIT_STEP_SECS": "1"
-                            }
-                        }
-                    }
-                },
-                "hostInterfaces": [
-                    {
-                        "namespace": "wasi",
-                        "package": "sockets",
-                        "interfaces": ["tcp"]
-                    }
-                ]
-            }
-        }
-    }
-}
-
-with open("/tmp/lattice-db-workload.json", "w") as f:
-    json.dump(doc, f)
-print("Wrote /tmp/lattice-db-workload.json")
-PYEOF
-
-  kubectl apply -f /tmp/lattice-db-workload.json
-
-  # Give lattice-db a head start — it needs to create KV buckets on first run
-  log "Waiting for lattice-db to initialize (10s)"
-  sleep 10
-
-  log "Deploying lattice-id"
+  log "Deploying lattice-id (with co-located lattice-db service)"
   kubectl apply -f deploy/workloaddeployment-local.yaml
 }
 

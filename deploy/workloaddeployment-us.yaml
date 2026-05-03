@@ -16,6 +16,17 @@ spec:
     spec:
       hostSelector:
         hostgroup: us
+      service:
+        image: kind-registry:5000/lattice-db/storage-service:dev
+        maxRestarts: 10
+        localResources:
+          environment:
+            config:
+              NATS_DATA_URL: "nats-data.us.svc.cluster.local:4222"
+              LDB_INSTANCE: "lid"
+              LDB_TCP_PORT: "4080"
+              LDB_CONSISTENCY_WATCHER_WAIT_STEPS: "2"
+              LDB_CONSISTENCY_WATCHER_WAIT_STEP_SECS: "1"
       components:
         - name: oidc-gateway
           image: kind-registry:5000/lattice-id/oidc-gateway:dev
@@ -45,8 +56,6 @@ spec:
           interfaces:
             - store
           config:
-            # Dev-only two-region manifest. Keep the same shared secret in both regions.
-            internal_auth_secret: "local-two-region-dev-secret"
             ldb_instance: "lid"
             dev_mode: "true"
             require_email_verification: "false"

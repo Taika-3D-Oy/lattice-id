@@ -77,7 +77,7 @@ if [[ "${1:-}" != "--no-build" ]]; then
 
   log "Pushing components to local OCI registry"
   REGISTRY_PORT="${REGISTRY_PORT:-5001}"
-  components=(oidc-gateway password-hasher email-worker abuse-protection key-manager region-authority)
+  components=(oidc-gateway password-hasher email-worker)
   for comp in "${components[@]}"; do
     wasm="${comp//-/_}"
     wash oci push --insecure "localhost:${REGISTRY_PORT}/lattice-id/${comp}:dev" \

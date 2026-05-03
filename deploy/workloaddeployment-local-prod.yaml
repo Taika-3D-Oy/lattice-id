@@ -12,6 +12,17 @@ spec:
       app.kubernetes.io/name: lattice-id
       app.kubernetes.io/component: authority
     spec:
+      service:
+        image: kind-registry:5000/lattice-db/storage-service:dev
+        maxRestarts: 10
+        localResources:
+          environment:
+            config:
+              NATS_DATA_URL: "nats-data:4222"
+              LDB_INSTANCE: "lid"
+              LDB_TCP_PORT: "4080"
+              LDB_CONSISTENCY_WATCHER_WAIT_STEPS: "2"
+              LDB_CONSISTENCY_WATCHER_WAIT_STEP_SECS: "1"
       components:
         - name: oidc-gateway
           image: kind-registry:5000/lattice-id/oidc-gateway:dev
@@ -45,7 +56,6 @@ spec:
           interfaces:
             - store
           config:
-            internal_auth_secret: "__INTERNAL_AUTH_SECRET__"
             ldb_instance: "lid"
             dev_mode: "true"
             require_email_verification: "true"

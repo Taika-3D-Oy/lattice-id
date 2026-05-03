@@ -1,7 +1,0 @@
-package taika3d:lid;
-
-world key-manager {
-    import wasi:config/store@0.2.0-rc.1;
-    import wasi:sockets/types@0.3.0-rc-2026-03-15;
-    export keys;
-}

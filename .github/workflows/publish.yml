@@ -81,7 +81,7 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
           IMAGE_PREFIX: ${{ steps.prefix.outputs.prefix }}
         run: |
-          components=(oidc-gateway password-hasher email-worker abuse-protection key-manager region-authority crypto-vault)
+          components=(oidc-gateway password-hasher email-worker)
           for comp in "${components[@]}"; do
             wasm="${comp//-/_}"
             echo "==> Pushing ${comp}:${TAG}"
@@ -111,6 +111,6 @@ jobs:
         run: |
           echo "## Published images" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-            for comp in oidc-gateway password-hasher email-worker abuse-protection key-manager region-authority crypto-vault admin-ui-host; do
+            for comp in oidc-gateway password-hasher email-worker admin-ui-host; do
             echo "- \`${IMAGE_PREFIX}/${comp}:${TAG}\`" >> "$GITHUB_STEP_SUMMARY"
           done

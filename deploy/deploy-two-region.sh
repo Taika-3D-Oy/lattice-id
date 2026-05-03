@@ -5,8 +5,7 @@
 # Each region gets its own Kind cluster with:
 #   - wasmCloud runtime-operator (Helm chart — control plane NATS with mTLS)
 #   - nats-data pod (region-local JetStream KV storage)
-#   - lattice-db workload (connects to nats-data)
-#   - lattice-id workload (oidc-gateway + satellites, messaging via nats-data)
+#   - lattice-id workload (oidc-gateway + co-located lattice-db service)
 #
 # Regions are fully independent — no NATS federation, leaf nodes, or shared
 # JetStream. All cross-region communication uses HTTP:
@@ -51,9 +50,6 @@ EU_HOST_PORT=8000
 US_HOST_PORT=8001
 EU_HOSTNAME="eu.lid.internal"
 US_HOSTNAME="us.lid.internal"
-
-# lattice-db image source (override if you want a pinned version)
-LATTICE_DB_IMAGE="${LATTICE_DB_IMAGE:-ghcr.io/taika-3d-oy/lattice-db/storage-service:v1.6.1}"
 
 log() { echo "==> $*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -155,72 +151,8 @@ EOF
   kubectl rollout status deploy/nats-data -n "$ns" --context "$ctx" --timeout=60s
 }
 
-# ── lattice-db workload (per region) ────────────────────────
-
-deploy_lattice_db() {
-  local ctx="$1" ns="$2"
-
-  local nats_ip
-  nats_ip=$(kubectl get svc nats-data -n "$ns" --context "$ctx" -o jsonpath='{.spec.clusterIP}')
-  log "Deploying lattice-db from ${LATTICE_DB_IMAGE} in $ns ($ctx) — NATS @ ${nats_ip}"
-
-  python3 - "$nats_ip" "$ns" "$LATTICE_DB_IMAGE" <<'PYEOF'
-import sys, json
-
-nats_ip, ns, lattice_db_image = sys.argv[1], sys.argv[2], sys.argv[3]
-
-doc = {
-    "apiVersion": "runtime.wasmcloud.dev/v1alpha1",
-    "kind": "WorkloadDeployment",
-    "metadata": {
-        "name": f"lattice-db-{ns}",
-        "namespace": ns,
-        "annotations": {"description": f"lattice-db storage service ({ns})"}
-    },
-    "spec": {
-        "replicas": 1,
-        "deployPolicy": "RollingUpdate",
-        "template": {
-            "labels": {
-                "app.kubernetes.io/name": "lattice-db",
-                "app.kubernetes.io/component": "storage"
-            },
-            "spec": {
-                "hostSelector": {"hostgroup": ns},
-                "components": [],
-                "service": {
-                  "image": lattice_db_image,
-                    "maxRestarts": 5,
-                    "localResources": {
-                        "environment": {
-                            "config": {
-                                "NATS_URL": nats_ip + ":4222",
-                                "LDB_INSTANCE": "lid",
-                                "LDB_CONSISTENCY_WATCHER_WAIT_STEPS": "2",
-                                "LDB_CONSISTENCY_WATCHER_WAIT_STEP_SECS": "1"
-                            }
-                        }
-                    }
-                },
-                "hostInterfaces": [
-                    {
-                        "namespace": "wasi",
-                        "package": "sockets",
-                        "interfaces": ["tcp"]
-                    }
-                ]
-            }
-        }
-    }
-}
-
-with open(f"/tmp/lattice-db-{ns}.json", "w") as f:
-    json.dump(doc, f)
-print(f"Wrote /tmp/lattice-db-{ns}.json")
-PYEOF
-
-  kubectl apply --context "$ctx" -f "/tmp/lattice-db-${ns}.json"
-}
+# ── lattice-db is now co-located as a service inside each workload ──
+# No separate lattice-db deployment needed.
 
 # ── Build & Push ─────────────────────────────────────────────
 
@@ -229,7 +161,7 @@ build_and_push() {
   cargo build --workspace --target wasm32-wasip3 --release
 
   log "Pushing components to local registry"
-  local components=(oidc-gateway password-hasher email-worker abuse-protection key-manager region-authority)
+  local components=(oidc-gateway password-hasher email-worker)
   for comp in "${components[@]}"; do
     local wasm
     if [[ -f "target/wasm32-wasip3/release/${comp}.wasm" ]]; then
@@ -260,10 +192,7 @@ if [[ "${1:-}" == "rebuild" ]]; then
   done
   sleep 2
 
-  # Redeploy lattice-db + lattice-id
-  deploy_lattice_db "$EU_CTX" "$EU_NS"
-  deploy_lattice_db "$US_CTX" "$US_NS"
-  sleep 5
+  # Redeploy lattice-id (lattice-db runs co-located as a service)
   compute_region_urls
   apply_workload "$EU_CTX" deploy/workloaddeployment-eu.yaml
   apply_workload "$US_CTX" deploy/workloaddeployment-us.yaml
@@ -484,13 +413,7 @@ deploy_nats_data "$US_CTX" "$US_NS"
 # 7. Build and push components
 build_and_push
 
-# 8. Deploy lattice-db (needs to start before lattice-id)
-deploy_lattice_db "$EU_CTX" "$EU_NS"
-deploy_lattice_db "$US_CTX" "$US_NS"
-log "Waiting for lattice-db to initialize (10s)"
-sleep 10
-
-# 9. Deploy lattice-id workloads
+# 8. Deploy lattice-id workloads (lattice-db runs co-located as a service)
 log "Deploying lattice-id workloads"
 compute_region_urls
 apply_workload "$EU_CTX" deploy/workloaddeployment-eu.yaml
