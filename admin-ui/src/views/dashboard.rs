@@ -87,16 +87,16 @@ pub fn DashboardView() -> impl IntoView {
         }}
 
         <div class="quick-actions">
-            <A href="/tenants" attr:class="btn btn-primary">"+ New Tenant"</A>
-            <A href="/clients" attr:class="btn">"+ New Client"</A>
-            <A href="/hooks"   attr:class="btn">"+ New Hook"</A>
+            <A href="tenants" attr:class="btn btn-primary">"+ New Tenant"</A>
+            <A href="clients" attr:class="btn">"+ New Client"</A>
+            <A href="hooks"   attr:class="btn">"+ New Hook"</A>
         </div>
 
         <div class="card">
             <div class="card-header">
                 <span class="card-title">"Recent Activity"</span>
                 <span class="card-spacer"></span>
-                <A href="/audit" attr:class="btn btn-sm btn-ghost">"View all →"</A>
+                <A href="audit" attr:class="btn btn-sm btn-ghost">"View all →"</A>
             </div>
             {move || if recent.get().is_empty() {
                 view! { <p class="text-muted" style="font-size:13px">"No recent events."</p> }.into_any()

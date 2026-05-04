@@ -59,7 +59,7 @@ pub fn App() -> impl IntoView {
     });
 
     view! {
-        <Router>
+        <Router base="/admin">
             <AppBody/>
             <ToastDisplay/>
         </Router>
@@ -236,12 +236,10 @@ fn Sidebar() -> impl IntoView {
 
     let active = move |seg: &'static str| -> &'static str {
         let p = location.pathname.get();
-        // Strip possible /admin prefix from path
-        let stripped = p.trim_start_matches('/');
-        let stripped = stripped
-            .strip_prefix("admin/").unwrap_or(stripped)
+        let stripped = p
+            .strip_prefix("/admin/").unwrap_or("")
             .trim_start_matches('/');
-        let stripped = if stripped == "admin" { "" } else { stripped };
+        let stripped = if p == "/admin" || p == "/admin/" { "" } else { stripped };
         if seg.is_empty() {
             if stripped.is_empty() { "sidebar-link active" } else { "sidebar-link" }
         } else if stripped == seg || stripped.starts_with(&format!("{seg}/")) {
@@ -254,7 +252,7 @@ fn Sidebar() -> impl IntoView {
     view! {
         <nav class="sidebar">
             <div class="sidebar-section-label">"Overview"</div>
-            <A href="/" attr:class=move || active("")>"Dashboard"</A>
+            <A href="" attr:class=move || active("")>"Dashboard"</A>
 
             <div class="sidebar-divider"></div>
             <div class="sidebar-section-label">"Tenant"</div>
@@ -265,7 +263,7 @@ fn Sidebar() -> impl IntoView {
                         <span class="sidebar-link text-muted" style="font-style:italic">"No tenant selected"</span>
                     }.into_any()
                 } else {
-                    let href = format!("/tenants/{cur}");
+                    let href = format!("tenants/{cur}");
                     view! {
                         <A href=href attr:class="sidebar-link">"Members"</A>
                     }.into_any()
@@ -274,16 +272,16 @@ fn Sidebar() -> impl IntoView {
 
             <div class="sidebar-divider"></div>
             <div class="sidebar-section-label">"Global"</div>
-            <A href="/tenants"           attr:class=move || active("tenants")>"Tenants"</A>
-            <A href="/clients"           attr:class=move || active("clients")>"Clients"</A>
-            <A href="/identity-providers" attr:class=move || active("identity-providers")>"Identity Providers"</A>
-            <A href="/hooks"             attr:class=move || active("hooks")>"Hooks"</A>
-            <A href="/settings"          attr:class=move || active("settings")>"Settings"</A>
-            <A href="/audit"             attr:class=move || active("audit")>"Audit Log"</A>
+            <A href="tenants"           attr:class=move || active("tenants")>"Tenants"</A>
+            <A href="clients"           attr:class=move || active("clients")>"Clients"</A>
+            <A href="identity-providers" attr:class=move || active("identity-providers")>"Identity Providers"</A>
+            <A href="hooks"             attr:class=move || active("hooks")>"Hooks"</A>
+            <A href="settings"          attr:class=move || active("settings")>"Settings"</A>
+            <A href="audit"             attr:class=move || active("audit")>"Audit Log"</A>
 
             <div class="sidebar-divider"></div>
             <div class="sidebar-section-label">"Account"</div>
-            <A href="/account" attr:class=move || active("account")>"My Account"</A>
+            <A href="account" attr:class=move || active("account")>"My Account"</A>
         </nav>
     }
 }

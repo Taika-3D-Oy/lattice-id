@@ -28,7 +28,7 @@ pub fn ClientDetailView() -> impl IntoView {
 
     view! {
         <div>
-            <a href="/" style="color: var(--primary); text-decoration: none;">"\u{2190} Back to clients"</a>
+            <a href="/admin/clients" style="color: var(--primary); text-decoration: none;">"\u{2190} Back to clients"</a>
         </div>
 
         {move || error.get().map(|e| view! { <p class="msg-error">{e}</p> })}

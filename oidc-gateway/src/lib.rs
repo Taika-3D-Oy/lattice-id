@@ -271,7 +271,7 @@ async fn handle(
         return Ok(index_page());
     }
 
-    if route_path.starts_with("/admin") {
+    if route_path == "/admin" || route_path.starts_with("/admin/") {
         return Ok(serve_admin_asset(route_path));
     }
 
@@ -1198,18 +1198,34 @@ fn serve_admin_asset(route_path: &str) -> Response<String> {
             {
                 String::from_utf8(a.data).unwrap_or_default()
             } else {
-                // SAFETY: these bytes are never used as a Rust &str — they
-                // pass straight into the WASI HTTP response body encoder.
+                // SAFETY: `Response<String>` is the crate-wide HTTP body type.
+                // For binary assets (wasm, images) the bytes are not valid UTF-8,
+                // but the wasip3 HTTP serializer converts the body via
+                // `String::into_bytes()` — it never inspects or reinterprets
+                // the bytes as a UTF-8 string.  No `String` methods are called
+                // on this value after construction; it flows directly into the
+                // WASI body encoder unchanged.
+                // TODO: migrate to `Response<Vec<u8>>` / `Response<Bytes>` to
+                // eliminate this formal unsoundness.
+                #[allow(unsafe_code)]
                 unsafe { String::from_utf8_unchecked(a.data) }
             };
-            // Cache static assets (hashed filenames) aggressively.
-            // Snippet files (snippets/**) are NOT hashed by name and must not
-            // be cached indefinitely — they can renumber across builds.
-            let is_hashed = asset_path.contains('-')
-                && !asset_path.starts_with("snippets/")
+            // Cache static assets with content-addressed filenames aggressively.
+            // Trunk emits `basename-<16 lowercase hex chars>.ext`; match that
+            // precisely to avoid caching any file that merely contains a hyphen.
+            // Snippet files (snippets/**) are NOT content-hashed by Trunk and
+            // must not be cached indefinitely — they renumber across builds.
+            let is_hashed = !asset_path.starts_with("snippets/")
                 && (asset_path.ends_with(".js")
                     || asset_path.ends_with(".wasm")
-                    || asset_path.ends_with(".css"));
+                    || asset_path.ends_with(".css"))
+                && asset_path
+                    .rsplit_once('.')
+                    .and_then(|(stem, _)| stem.rsplit_once('-'))
+                    .map(|(_, hash)| {
+                        hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit())
+                    })
+                    .unwrap_or(false);
             let cache = if is_hashed {
                 "public, max-age=31536000, immutable"
             } else {

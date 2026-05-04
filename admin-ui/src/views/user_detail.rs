@@ -126,7 +126,7 @@ pub fn UserDetailView() -> impl IntoView {
 
     view! {
         <div>
-            <a href="/users" style="color: var(--primary); text-decoration: none;">"\u{2190} Back to users"</a>
+            <a href="/admin/tenants" style="color: var(--primary); text-decoration: none;">"\u{2190} Back to tenants"</a>
         </div>
 
         {move || error.get().map(|e| view! { <p class="msg-error">{e}</p> })}

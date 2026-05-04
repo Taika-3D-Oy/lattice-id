@@ -27,13 +27,20 @@ impl exports::lattice_id::admin::assets::Guest for Host {
         let data = file.contents().to_vec();
 
         let content_type = match target_path.split('.').last() {
-            Some("html") => "text/html",
+            Some("html") => "text/html; charset=utf-8",
             Some("js") => "application/javascript",
             Some("wasm") => "application/wasm",
-            Some("css") => "text/css",
+            Some("css") => "text/css; charset=utf-8",
             Some("png") => "image/png",
+            Some("jpg") | Some("jpeg") => "image/jpeg",
+            Some("gif") => "image/gif",
+            Some("webp") => "image/webp",
             Some("svg") => "image/svg+xml",
-            Some("json") => "application/json",
+            Some("ico") => "image/x-icon",
+            Some("json") | Some("map") => "application/json",
+            Some("woff") => "font/woff",
+            Some("woff2") => "font/woff2",
+            Some("txt") => "text/plain; charset=utf-8",
             _ => "application/octet-stream",
         }
         .to_string();

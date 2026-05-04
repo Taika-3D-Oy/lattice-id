@@ -120,7 +120,7 @@ pub fn TenantDetailView() -> impl IntoView {
 
     view! {
         <div class="breadcrumb">
-            <A href="/tenants">"Tenants"</A>
+            <A href="tenants">"Tenants"</A>
             <span class="text-muted">"›"</span>
             <span>{move || tenant.get().map(|t| t.display_name.clone()).unwrap_or_else(|| tenant_id.get())}</span>
         </div>

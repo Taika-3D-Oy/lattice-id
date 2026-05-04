@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-05-04
+
+### Fixed
+
+- **Admin UI SPA routing**: Added `base="/admin"` to the Leptos `<Router>` so
+  all routes are correctly scoped under `/admin/`. Previously, navigating to e.g.
+  `/admin/tenants` and refreshing would serve raw API JSON (or trigger the
+  user-facing passkeys/account UI for conflicting paths). All sidebar `<A>` hrefs
+  and in-view back-links updated to match.
+- **Admin route prefix check**: Gateway handler now matches `/admin` exactly or
+  `/admin/*`, preventing paths like `/administer` from being caught by the SPA
+  fallback.
+- **Admin asset cache-control**: Hashed-filename detection now requires the hash
+  suffix to be exactly 16 lowercase hex digits (matching Trunk's actual output),
+  avoiding a 1-year immutable cache for any file that merely has a hyphen in its
+  name.
+- **Admin UI wasm-opt**: Trunk's wasm-opt was explicitly disabled (`"0"`) in
+  `index.html`; changed to `"z"` (optimize for size). Expected to reduce the wasm
+  bundle significantly on next build.
+- **Admin host MIME types**: Added `jpg/jpeg`, `gif`, `webp`, `ico`, `woff`,
+  `woff2`, `txt`, and source maps (`.map`) to the content-type table. `text/html`
+  and `text/css` now include `charset=utf-8`.
+
 ## [1.5.0] - 2026-05-03
 
 ### Changed

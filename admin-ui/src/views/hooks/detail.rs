@@ -144,7 +144,7 @@ pub fn HookDetailView() -> impl IntoView {
 
     view! {
         <div class="breadcrumb">
-            <A href="/hooks">"Hooks"</A>
+            <A href="hooks">"Hooks"</A>
             <span class="text-muted">"›"</span>
             <span>{move || hook.get().map(|h| h.name.clone()).unwrap_or_else(|| hook_id.get())}</span>
         </div>
