@@ -67,7 +67,7 @@ pub fn UserListView() -> impl IntoView {
                         on:input=move |ev| set_filter.set(event_target_value(&ev))/>
                     {move || {
                         let tid = tenant_ctx.current_id.get();
-                        view! { <A href=format!("/tenants/{tid}") attr:class="btn btn-primary">"+ Invite User"</A> }
+                        view! { <A href=format!("/admin/tenants/{tid}") attr:class="btn btn-primary">"+ Invite User"</A> }
                     }}
                 </div>
 
@@ -98,7 +98,7 @@ pub fn UserListView() -> impl IntoView {
                                                 <td><span class="badge badge-accent">{m.role.clone()}</span></td>
                                                 <td class="text-muted">{api::relative_time(m.joined_at)}</td>
                                                 <td class="actions">
-                                                    <A href=format!("/users/{uid}") attr:class="btn btn-sm">"Detail"</A>
+                                                    <A href=format!("/admin/users/{uid}") attr:class="btn btn-sm">"Detail"</A>
                                                 </td>
                                             </tr>
                                         }

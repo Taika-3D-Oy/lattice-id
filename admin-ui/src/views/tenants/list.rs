@@ -127,7 +127,7 @@ pub fn TenantListView() -> impl IntoView {
                                         <td><span class=status_class>{t.status.clone()}</span></td>
                                         <td class="text-muted">{api::format_timestamp(t.created_at)}</td>
                                         <td class="actions">
-                                            <A href=format!("/tenants/{tid}") attr:class="btn btn-sm">"View →"</A>
+                                            <A href=format!("/admin/tenants/{tid}") attr:class="btn btn-sm">"View →"</A>
                                         </td>
                                     </tr>
                                 }

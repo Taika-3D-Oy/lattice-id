@@ -189,7 +189,7 @@ pub fn TenantDetailView() -> impl IntoView {
                                                     <td><span class="badge badge-accent">{m.role.clone()}</span></td>
                                                     <td class="text-muted">{api::relative_time(m.joined_at)}</td>
                                                     <td class="actions">
-                                                        <A href=format!("/users/{uid}") attr:class="btn btn-sm btn-ghost">"Detail"</A>
+                                                        <A href=format!("/admin/users/{uid}") attr:class="btn btn-sm btn-ghost">"Detail"</A>
                                                         <button class="btn btn-sm btn-danger"
                                                             on:click=move |_| on_remove2(uid2.clone())>"Remove"</button>
                                                     </td>

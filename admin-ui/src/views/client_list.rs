@@ -144,7 +144,7 @@ pub fn ClientListView() -> impl IntoView {
                                         <td class="mono-sm">{c.redirect_uris.join(", ")}</td>
                                         <td>{if c.client_secret.is_some() { "Yes" } else { "No" }}</td>
                                         <td>
-                                            <A href=format!("/clients/{}", cid) attr:class="btn btn-sm">"View"</A>
+                                            <A href=format!("/admin/clients/{}", cid) attr:class="btn btn-sm">"View"</A>
                                         </td>
                                     </tr>
                                 }

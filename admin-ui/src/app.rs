@@ -263,7 +263,7 @@ fn Sidebar() -> impl IntoView {
                         <span class="sidebar-link text-muted" style="font-style:italic">"No tenant selected"</span>
                     }.into_any()
                 } else {
-                    let href = format!("/tenants/{cur}");
+                    let href = format!("/admin/tenants/{cur}");
                     view! {
                         <A href=href attr:class="sidebar-link">"Members"</A>
                     }.into_any()

@@ -111,7 +111,7 @@ pub fn HookListView() -> impl IntoView {
                                         <td class="text-muted">{h.priority}</td>
                                         <td class="mono-sm">"v"{h.version}</td>
                                         <td class="actions">
-                                            <A href=format!("/hooks/{hid}") attr:class="btn btn-sm">"Edit →"</A>
+                                            <A href=format!("/admin/hooks/{hid}") attr:class="btn btn-sm">"Edit →"</A>
                                         </td>
                                     </tr>
                                 }
