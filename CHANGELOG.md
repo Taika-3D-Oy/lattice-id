@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.3] - 2026-05-05
+
+### Security
+
+- **Fail-fast on missing KMS config**: `vault.rs` no longer falls back to a
+  hardcoded development seed when `kms_endpoint` is absent. The component now
+  panics at startup with a descriptive error unless either `kms_endpoint`
+  (production) or `kms_dev_seed + dev_mode=true` (development) is explicitly
+  configured. Using `kms_dev_seed` while `dev_mode=false` is also rejected so a
+  misconfigured deployment cannot silently use a weak key.
+
+- **HMAC-peppered email index**: All email-keyed KV entries
+  (`email:{hash}` in the user-idx store) now use `HMAC-SHA256(lowercase_email,
+  pepper)` as the key instead of the plaintext email address. The pepper is
+  supplied via the `email_pepper` config key (32+ random bytes). Without the
+  pepper, an attacker with NATS read access cannot enumerate or rainbow-table
+  user emails. Deployments must set `email_pepper`; a warning is logged and
+  operation continues without HMAC if the config key is absent so existing dev
+  environments keep working. **Migration note**: existing records in
+  `user-idx` use plaintext keys and will become unreachable after deploying this
+  change; a one-time reindex or fresh deployment is required.
+
+- **Hashed client secrets**: `OidcClient.client_secret` now stores
+  `HMAC-SHA256(raw_secret, client_secret_pepper)` rather than the raw 32-byte
+  hex value. The raw secret is returned exactly once at client creation. Token
+  endpoint verification recomputes the HMAC before the constant-time compare.
+  Configure via `client_secret_pepper`. Existing confidential clients must be
+  rotated after deploying this change.
+
+- **Rate-limit `/internal/lookup`**: Cross-region email-hash lookups are now
+  limited to 60 requests per minute per source IP using the existing abuse
+  protection component. Exceeding the limit returns `429 Too Many Requests`.
+  This prevents an authenticated-but-malicious peer region from enumerating
+  email hashes at high speed.
+
 ## [1.5.2] - 2026-05-04
 
 ### Fixed

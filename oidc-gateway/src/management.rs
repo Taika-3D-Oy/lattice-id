@@ -578,14 +578,18 @@ pub async fn create_client(auth: Option<&str>, body: &[u8]) -> Result<Response<S
     }
 
     let client_secret = if req.confidential {
-        Some(store::random_hex(32))
+        let raw = store::random_hex(32);
+        // Store an HMAC of the secret, not the raw value.
+        // The raw secret is returned to the caller once at creation time.
+        let hashed = store::hmac_client_secret(&raw);
+        Some((raw, hashed))
     } else {
         None
     };
 
     let client = store::OidcClient {
         client_id: store::random_hex(16),
-        client_secret: client_secret.clone(),
+        client_secret: client_secret.as_ref().map(|(_, h)| h.clone()),
         name: req.name,
         redirect_uris: req.redirect_uris,
         grant_types: req.grant_types.unwrap_or_else(|| {
@@ -630,9 +634,9 @@ pub async fn create_client(auth: Option<&str>, body: &[u8]) -> Result<Response<S
         "redirect_uris": client.redirect_uris,
         "grant_types": client.grant_types,
     });
-    // Only show secret once at creation time
-    if let Some(secret) = client_secret {
-        resp["client_secret"] = serde_json::json!(secret);
+    // Only show raw secret once at creation time
+    if let Some((raw_secret, _)) = client_secret {
+        resp["client_secret"] = serde_json::json!(raw_secret);
     }
 
     json_response(StatusCode::CREATED, &resp)

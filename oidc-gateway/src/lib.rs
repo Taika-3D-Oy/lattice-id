@@ -435,6 +435,19 @@ async fn handle(
         // ── Cross-region internal lookup ─────────────────────
         (&Method::GET, "/internal/lookup") => {
             verify_internal_auth(&parts.headers)?;
+            // Rate-limit: 60 lookups per minute per calling IP to prevent
+            // email-existence enumeration via the cross-region API.
+            if remote_ip != "unknown" {
+                if let Ok((false, _)) =
+                    service_client::check_rate(&format!("internal_lookup:{remote_ip}"), 60, 60)
+                        .await
+                {
+                    return Ok(error_json(
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "lookup rate limit exceeded",
+                    ));
+                }
+            }
             handle_internal_lookup(query).await
         }
         (&Method::GET, "/internal/config") => {
@@ -876,7 +889,7 @@ async fn handle_register(body_bytes: &[u8]) -> Result<Response<String>, String> 
             "email_verification_link_generated",
             &user.id,
             &user.id,
-            &store::sanitize_email_for_lookup(&verify_token),
+            &store::hmac_email(&verify_token),
         )
         .await;
         if is_dev_mode() {

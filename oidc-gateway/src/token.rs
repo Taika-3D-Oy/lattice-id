@@ -899,12 +899,18 @@ async fn verify_client(
         .await?
         .ok_or_else(|| format!("unknown client_id: {client_id}"))?;
 
-    if let Some(expected_secret) = &client.client_secret {
+    if let Some(stored_hash) = &client.client_secret {
         match client_secret {
-            Some(provided) if provided.as_bytes().ct_eq(expected_secret.as_bytes()).into() => {
-                Ok(client)
+            Some(provided) => {
+                // Hash the provided secret with the same pepper used at creation time
+                // and compare against the stored HMAC hash.
+                let provided_hash = store::hmac_client_secret(provided);
+                if provided_hash.as_bytes().ct_eq(stored_hash.as_bytes()).into() {
+                    Ok(client)
+                } else {
+                    Err("invalid client_secret".into())
+                }
             }
-            Some(_) => Err("invalid client_secret".into()),
             None => Err("client_secret required for confidential clients".into()),
         }
     } else {

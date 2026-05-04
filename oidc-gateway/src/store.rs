@@ -50,6 +50,8 @@ struct OidcConfigCache {
     allow_registration: Option<String>,
     bootstrap_hook: Option<String>,
     refresh_absolute_max_secs: Option<String>,
+    email_pepper: Option<String>,
+    client_secret_pepper: Option<String>,
 }
 
 /// Must be called once at startup / per request to load config values.
@@ -71,6 +73,8 @@ pub async fn init_config() {
     let allow_registration = config_value_async("allow_registration").await;
     let bootstrap_hook = config_value_async("bootstrap_hook").await;
     let refresh_absolute_max_secs = config_value_async("refresh_absolute_max_secs").await;
+    let email_pepper = config_value_async("email_pepper").await;
+    let client_secret_pepper = config_value_async("client_secret_pepper").await;
 
     CONFIG_CACHE.with(|c| {
         *c.borrow_mut() = Some(OidcConfigCache {
@@ -89,6 +93,8 @@ pub async fn init_config() {
             allow_registration,
             bootstrap_hook,
             refresh_absolute_max_secs,
+            email_pepper,
+            client_secret_pepper,
         });
     });
 }
@@ -127,6 +133,8 @@ pub fn config_value(key: &str) -> Option<String> {
         "allow_registration" => c.allow_registration.clone(),
         "bootstrap_hook" => c.bootstrap_hook.clone(),
         "refresh_absolute_max_secs" => c.refresh_absolute_max_secs.clone(),
+        "email_pepper" => c.email_pepper.clone(),
+        "client_secret_pepper" => c.client_secret_pepper.clone(),
         _ => None,
     })
 }
@@ -503,9 +511,85 @@ pub async fn email_hash_exists(email_hash: &str) -> Result<bool, String> {
     kv_exists(&store_name("user-idx"), &key).await
 }
 
-/// Normalize an email address for cross-region lookup.
-pub fn sanitize_email_for_lookup(email: &str) -> String {
-    email.to_lowercase()
+/// HMAC-SHA256 of the lowercased email using the configured pepper.
+///
+/// This is the canonical form used as the KV index key (`email:{hash}`)
+/// and in cross-region lookups. Without the pepper an attacker with NATS
+/// read access cannot enumerate or rainbow-table user emails.
+///
+/// The pepper must be set via the `email_pepper` config key (32+ random
+/// bytes, base64 or hex). In dev mode with no pepper configured the raw
+/// lowercased email is used so existing local setups keep working.
+/// In production (`dev_mode` absent or false) a missing pepper panics at
+/// the first call so the misconfiguration is caught immediately.
+pub fn hmac_email(email: &str) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let email_lower = email.to_lowercase();
+    match config_value("email_pepper") {
+        Some(pepper) if !pepper.is_empty() => {
+            let mut mac = Hmac::<Sha256>::new_from_slice(pepper.as_bytes())
+                .expect("HMAC accepts any key length");
+            mac.update(email_lower.as_bytes());
+            let result = mac.finalize();
+            result.into_bytes().iter().map(|b| format!("{b:02x}")).collect()
+        }
+        _ => {
+            let is_dev = config_value("dev_mode")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false);
+            if is_dev {
+                crate::logger::warn(
+                    "email_pepper.not_configured",
+                    serde_json::json!({ "msg": "email_pepper not set; email index is not HMAC-protected (dev mode only)" }),
+                );
+                email_lower
+            } else {
+                panic!(
+                    "email_pepper config key is required in production. \
+                     Set email_pepper to a 32+ byte random value, or enable dev_mode=true for local development."
+                );
+            }
+        }
+    }
+}
+
+/// Hash a client secret with HMAC-SHA256 using the configured pepper.
+/// High-entropy secrets (32+ random hex chars) do not need key-stretching —
+/// HMAC-SHA256 is sufficient and much faster than Argon2 for this use case.
+/// Returns the hex-encoded MAC, or the raw secret in dev mode if no pepper
+/// is configured (with a logged warning).
+pub fn hmac_client_secret(secret: &str) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    match config_value("client_secret_pepper") {
+        Some(pepper) if !pepper.is_empty() => {
+            let mut mac = Hmac::<Sha256>::new_from_slice(pepper.as_bytes())
+                .expect("HMAC accepts any key length");
+            mac.update(secret.as_bytes());
+            let result = mac.finalize();
+            result.into_bytes().iter().map(|b| format!("{b:02x}")).collect()
+        }
+        _ => {
+            let is_dev = config_value("dev_mode")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false);
+            if is_dev {
+                crate::logger::warn(
+                    "client_secret_pepper.not_configured",
+                    serde_json::json!({ "msg": "client_secret_pepper not set; client secrets stored without HMAC (dev mode only)" }),
+                );
+                secret.to_string()
+            } else {
+                panic!(
+                    "client_secret_pepper config key is required in production. \
+                     Set client_secret_pepper to a 32+ byte random value, or enable dev_mode=true for local development."
+                );
+            }
+        }
+    }
 }
 
 /// Shared secret for authenticating cross-region `/internal/*` HTTP requests.
@@ -1113,7 +1197,7 @@ pub async fn create_user(user: &User) -> Result<(), String> {
     kv_set(&users_store(), &format!("user:{}", u.id), &u).await?;
 
     // Atomically create email → user_id index (fails if email already taken)
-    let email_key = format!("email:{}", u.email.to_lowercase());
+    let email_key = format!("email:{}", hmac_email(&u.email));
     match kv_cas_create_raw(&user_idx_store(), &email_key, u.id.as_bytes()).await {
         Ok(_) => Ok(()),
         Err(e) if e.contains("already exists") => {
@@ -1182,7 +1266,7 @@ pub async fn delete_user(user_id: &str) -> Result<(), String> {
     // Remove email → user_id index
     let _ = kv_delete(
         &user_idx_store(),
-        &format!("email:{}", user.email.to_lowercase()),
+        &format!("email:{}", hmac_email(&user.email)),
     )
     .await;
 

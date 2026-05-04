@@ -68,12 +68,36 @@ async fn load_master_key(version: u32) -> Result<[u8; 32], VaultError> {
         .unwrap_or_default();
 
     if kms_endpoint.is_empty() {
+        // Dev-mode seed path: only permitted when dev_mode=true.
+        // Crashes if neither kms_endpoint nor kms_dev_seed is configured so
+        // a production misconfiguration is caught at startup rather than
+        // silently using an insecure public default.
+        let is_dev = crate::store::config_value("dev_mode")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
         let seed = crate::bindings::wasi::config::store::get("kms_dev_seed".to_string())
             .await
             .ok()
             .flatten()
-            .unwrap_or_else(|| "lattice-id-insecure-dev-seed-change-in-prod".to_string());
-        return Ok(dev_master_from_seed(&seed, version));
+            .filter(|s| !s.trim().is_empty());
+        match seed {
+            Some(s) if is_dev => return Ok(dev_master_from_seed(&s, version)),
+            Some(_) => {
+                // kms_dev_seed present but dev_mode is off — refuse to start.
+                return Err(VaultError::KmsUnavailable(
+                    "kms_dev_seed is set but dev_mode is false. \
+                     Set kms_endpoint for production or enable dev_mode for local development."
+                        .into(),
+                ));
+            }
+            None => {
+                return Err(VaultError::KmsUnavailable(
+                    "No KMS configured: set kms_endpoint (production) \
+                     or kms_dev_seed + dev_mode=true (development)."
+                        .into(),
+                ));
+            }
+        }
     }
 
     let table = vault_table();

@@ -381,7 +381,7 @@ pub async fn handle_login(body_bytes: &[u8], remote_ip: &str) -> Result<Response
         _ => {
             // Cross-region redirect: if user not found locally, check remote regions
             if store::region_id().is_some() {
-                let email_hash = store::sanitize_email_for_lookup(&email.to_lowercase());
+                let email_hash = store::hmac_email(&email.to_lowercase());
                 if let Ok(Some(region)) = crate::service_client::lookup_region(&email_hash).await
                     && let Some(base_url) = store::region_domain(&region)
                 {
