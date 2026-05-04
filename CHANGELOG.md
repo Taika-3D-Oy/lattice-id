@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.2] - 2026-05-04
+
+### Fixed
+
+- **Admin UI wasm-opt CI fix**: Trunk's bundled wasm-opt does not enable
+  bulk-memory operations, causing a `wasm-validator` error on the `memory.copy`
+  instructions emitted by Rust's `wasm32-unknown-unknown` target. `data-wasm-opt`
+  is now set to `"0"` so Trunk skips its built-in pass; a dedicated CI step
+  installs `binaryen` from apt and runs `wasm-opt --enable-bulk-memory -Oz`
+  on the built wasm files before they are bundled into the host component.
+
 ## [1.5.1] - 2026-05-04
 
 ### Fixed

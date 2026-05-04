@@ -76,6 +76,27 @@ jobs:
           cd admin-ui && trunk build --release
           cd host && cargo build --target wasm32-wasip2 --release
 
+      - name: Optimise admin-ui wasm
+        run: |
+          # Trunk's bundled wasm-opt does not enable the wasm features that
+          # Rust's wasm32-unknown-unknown target uses by default. Run wasm-opt
+          # manually with all required feature flags:
+          #   --enable-bulk-memory              memory.copy / memory.fill
+          #   --enable-sign-ext                 i32.extend8_s / i64.extend8_s etc.
+          #   --enable-nontrapping-float-to-int i64.trunc_sat_f64_u etc.
+          #   --enable-mutable-globals          mutable imported globals
+          #   --enable-reference-types          externref / funcref
+          sudo apt-get install -y --no-install-recommends binaryen
+          for f in admin-ui/dist/*.wasm; do
+            wasm-opt \
+              --enable-bulk-memory \
+              --enable-sign-ext \
+              --enable-nontrapping-float-to-int \
+              --enable-mutable-globals \
+              --enable-reference-types \
+              -Oz -o "$f" "$f"
+          done
+
       - name: Push components to GHCR
         env:
           TAG: ${{ steps.tag.outputs.tag }}
