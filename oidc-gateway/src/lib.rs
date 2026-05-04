@@ -700,8 +700,9 @@ async fn route_api(
         (&Method::DELETE, ["api", "identity-providers", id]) => {
             management::delete_identity_provider(auth, id).await
         }
-        // ── Hook management ─────────────────────────────────
-        // GET /api/hooks
+        // ── Clients (dynamic) ───────────────────────────────
+        (&Method::PUT, ["api", "clients", id]) => management::update_client(auth, id, body).await,
+        // ── Hooks ──────────────────────────────────────────────
         (&Method::GET, ["api", "hooks"]) => management::list_hooks(auth).await,
         // POST /api/hooks
         (&Method::POST, ["api", "hooks"]) => management::create_hook(auth, body).await,

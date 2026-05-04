@@ -638,6 +638,66 @@ pub async fn create_client(auth: Option<&str>, body: &[u8]) -> Result<Response<S
     json_response(StatusCode::CREATED, &resp)
 }
 
+/// PUT /api/clients/:id
+pub async fn update_client(
+    auth: Option<&str>,
+    id: &str,
+    body: &[u8],
+) -> Result<Response<String>, String> {
+    let claims = require_auth(auth).await?;
+    require_superadmin(&claims)?;
+
+    let mut client = store::get_client(id).await?.ok_or("client not found")?;
+
+    #[derive(serde::Deserialize)]
+    struct Req {
+        redirect_uris: Option<Vec<String>>,
+        name: Option<String>,
+        grant_types: Option<Vec<String>>,
+    }
+
+    let req: Req = serde_json::from_slice(body).map_err(|e| format!("invalid JSON: {e}"))?;
+
+    if let Some(uris) = req.redirect_uris {
+        if uris.is_empty() {
+            return Err("at least one redirect_uri is required".into());
+        }
+        for uri in &uris {
+            if !uri.starts_with("http://") && !uri.starts_with("https://") {
+                return Err("redirect_uris must use http or https scheme".into());
+            }
+        }
+        client.redirect_uris = uris;
+    }
+    if let Some(name) = req.name {
+        if name.is_empty() {
+            return Err("name is required".into());
+        }
+        client.name = name;
+    }
+    if let Some(grant_types) = req.grant_types {
+        client.grant_types = grant_types;
+    }
+
+    store::save_client(&client).await?;
+
+    let mut client_for_sync = serde_json::to_value(&client).unwrap_or_default();
+    if let Some(obj) = client_for_sync.as_object_mut() {
+        obj.remove("client_secret");
+    }
+    crate::service_client::replicate_to_regions("put", "client", id, Some(&client_for_sync)).await;
+
+    let sub = claims.get("sub").and_then(|v| v.as_str()).unwrap_or("");
+    let _ = store::log_audit("client_updated", sub, &client.client_id, &client.name).await;
+
+    json_ok(&serde_json::json!({
+        "client_id": client.client_id,
+        "name": client.name,
+        "redirect_uris": client.redirect_uris,
+        "grant_types": client.grant_types,
+    }))
+}
+
 // ── Password reset initiation ───────────────────────────────
 
 /// POST /api/users/:id/password-reset

@@ -159,6 +159,27 @@ pub async fn create_client(token: &str, req: &CreateClientRequest) -> Result<Oid
     resp.json().await.map_err(|e| err(e.to_string()))
 }
 
+pub async fn update_client_redirect_uris(
+    token: &str,
+    client_id: &str,
+    redirect_uris: Vec<String>,
+) -> Result<()> {
+    let body = serde_json::json!({ "redirect_uris": redirect_uris });
+    let resp = Request::put(&format!("/api/clients/{client_id}"))
+        .header("Authorization", &format!("Bearer {token}"))
+        .header("Content-Type", "application/json")
+        .body(body.to_string())
+        .map_err(|e| err(e.to_string()))?
+        .send()
+        .await
+        .map_err(|e| err(e.to_string()))?;
+    if !resp.ok() {
+        let msg = resp.text().await.unwrap_or_else(|_| "update failed".into());
+        return Err(err(msg));
+    }
+    Ok(())
+}
+
 // ── Users ───────────────────────────────────────────────────
 
 pub async fn fetch_users(token: &str) -> Result<Vec<User>> {
