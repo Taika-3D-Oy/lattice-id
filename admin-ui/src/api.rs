@@ -652,7 +652,10 @@ pub async fn fetch_audit_log_filtered(token: &str, filters: &AuditFilters) -> Re
         .header("Authorization", &format!("Bearer {token}"))
         .send().await.map_err(|e| err(e.to_string()))?;
     if !resp.ok() { return Err(err(format!("HTTP {}", resp.status()))); }
-    resp.json().await.map_err(|e| err(e.to_string()))
+    #[derive(serde::Deserialize)]
+    struct Envelope { events: Vec<AuditEntry> }
+    let envelope: Envelope = resp.json().await.map_err(|e| err(e.to_string()))?;
+    Ok(envelope.events)
 }
 
 // ── Helpers ─────────────────────────────────────────────────
