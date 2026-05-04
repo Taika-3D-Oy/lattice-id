@@ -74,13 +74,14 @@ Regions share that secret via `internal_auth_secret` in `wasi:config/store`.
    │  │  ├─ email-worker      │  │repli- │  │  ├─ email-worker      │  │
    │  │  ├─ abuse-protection  │  │cate   │  │  ├─ abuse-protection  │  │
    │  │  ├─ key-manager       │  │       │  │  ├─ key-manager       │  │
-   │  │  └─ region-authority  │  │       │  │  └─ region-authority  │  │
+   │  │  ├─ region-authority  │  │       │  │  ├─ region-authority  │  │
+   │  │  └─ lattice-db        │  │       │  │  └─ lattice-db        │  │
    │  └───────────────────────┘  │       │  └───────────────────────┘  │
    │                             │       │                             │
-   │  ┌──────────┐ ┌──────────┐  │       │  ┌──────────┐ ┌──────────┐  │
-   │  │lattice-db│ │nats-data │  │       │  │lattice-db│ │nats-data │  │
-   │  │          │ │ (local)  │  │       │  │          │ │ (local)  │  │
-   │  └──────────┘ └──────────┘  │       │  └──────────┘ └──────────┘  │
+   │  ┌──────────┐               │       │  ┌──────────┐               │
+   │  │nats-data │               │       │  │nats-data │               │
+   │  │ (local)  │               │       │  │ (local)  │               │
+   │  └──────────┘               │       │  └──────────┘               │
    │                             │       │                             │
    │  ┌──────────────┐           │       │  ┌──────────────┐           │
    │  │gateway-       │           │       │  │gateway-       │           │
@@ -117,8 +118,6 @@ Regions share that secret via `internal_auth_secret` in `wasi:config/store`.
      (FRA-1)  (FRA-2)  (AMS-1)  (IAD-1)  (IAD-2)
           │      │      │           │      │
           └──────┼──────┘           └──────┘
-                 │ NATS req/reply          │ NATS req/reply
-          lattice-db (EU)           lattice-db (US)
                  │                          │
           ┌──────┘                          └──────┐
           ▼                                        ▼
@@ -152,13 +151,12 @@ Regions share that secret via `internal_auth_secret` in `wasi:config/store`.
 - After tenant/client mutations: fires HTTP POST `/internal/replicate` to all other regions
 - Requires `internal_auth_secret` on all cross-region `/internal/*` requests
 
-### lattice-db (storage service, 1 per workload)
+### lattice-db (storage component, co-deployed per workload)
 
-- Subscribes to `ldb.>` NATS subjects (request/reply)
-- Provides KV with CAS semantics to all components via `wasmcloud:messaging`
+- WIT component bundled within the workload (no separate WorkloadDeployment)
+- Provides KV with CAS semantics to co-located components
 - Backed by NATS JetStream KV (one bucket per table)
-- Deployed as a separate WorkloadDeployment with `NATS_URL` pointing to the
-  region's `nats-data` service ClusterIP
+- Connects directly to the region's `nats-data` service; no NATS req/reply broker
 
 ### region-authority (stateless WIT component)
 
@@ -306,7 +304,7 @@ from the correct region. No key replication is needed.
 ### Known Gaps (must fix before production)
 
 1. **Intra-cluster NATS traffic unencrypted**: NATS traffic within each
-   Kind cluster (between wasmCloud host, lattice-db, and nats-data) uses
+   Kind cluster (between the wasmCloud host and nats-data) uses
    plain text. Production requires TLS.
 
 2. **No retry for HTTP replication**: Tenant/client sync is fire-and-forget.
@@ -407,7 +405,7 @@ Deletes both Kind clusters and the OCI registry.
 
 ## Scaling
 
-- **Within a region**: Add workloads (each = N gateways + lattice-db + satellites).
+- **Within a region**: Add workloads (each = N gateways + satellites; lattice-db is co-deployed within each workload).
   All workloads share the same regional NATS KV. CAS prevents conflicts.
 - **Across regions**: Deploy independent NATS clusters. Configure
   `region_internal_urls` with each region's HTTP endpoint and configure the
