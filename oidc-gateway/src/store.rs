@@ -1333,7 +1333,7 @@ pub async fn get_user_by_email(email: &str) -> Result<Option<User>, String> {
         }
         _ => {
             // User is local, or authority doesn't know — check local KV
-            let email_key = format!("email:{}", email_lower);
+            let email_key = format!("email:{}", hmac_email(&email_lower));
             match kv_get_raw(&user_idx_store(), &email_key).await? {
                 Some(bytes) => {
                     let user_id = String::from_utf8_lossy(&bytes);
