@@ -40,7 +40,6 @@ mod token;
 pub mod totp;
 mod userinfo;
 pub mod util;
-mod vault;
 
 use http::{Method, Response, StatusCode};
 use wasip3::http::types::ErrorCode;

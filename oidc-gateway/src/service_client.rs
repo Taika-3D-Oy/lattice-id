@@ -102,28 +102,6 @@ pub async fn check_rate(key: &str, limit: u64, window_secs: u64) -> Result<(bool
     crate::abuse::check_rate(key, limit, window_secs).await
 }
 
-// ── Envelope encryption helpers ──────────────────────────────
-
-/// Encrypt `plaintext` bound to `context` (AAD) via the inlined vault module.
-pub async fn vault_encrypt(context: &str, plaintext: &[u8]) -> Result<Vec<u8>, String> {
-    crate::vault::encrypt(context, plaintext)
-        .await
-        .map_err(|e| format!("vault_encrypt({context}): {e}"))
-}
-
-/// Decrypt an envelope produced by `vault_encrypt`.
-pub async fn vault_decrypt(context: &str, ciphertext: &[u8]) -> Result<Vec<u8>, String> {
-    crate::vault::decrypt(context, ciphertext)
-        .await
-        .map_err(|e| format!("vault_decrypt({context}): {e}"))
-}
-
-/// Return the currently active vault key version (for monitoring).
-#[allow(dead_code)]
-pub fn vault_version() -> u32 {
-    crate::vault::current_version()
-}
-
 pub async fn increment_metric(name: &str, labels: &[(&str, &str)]) -> Result<(), String> {
     let label_map: serde_json::Map<String, serde_json::Value> = labels
         .iter()

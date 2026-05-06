@@ -993,69 +993,6 @@ pub async fn kv_delete(store_name: &str, key: &str) -> Result<(), String> {
     Ok(())
 }
 
-// ── Encrypted KV helpers (envelope encryption via crypto-vault) ──────────────
-
-/// First envelope byte values ≥ this constant are not JSON (which starts with
-/// `{` = 0x7B or `[` = 0x5B).  Anything ≤ this is treated as legacy plaintext
-/// to support zero-downtime migration from unencrypted to encrypted records.
-const ENVELOPE_VERSION_MAX_MIGRATION: u8 = 100;
-
-/// Write a value serialised as JSON and then envelope-encrypted.
-/// `context` is the AAD/binding string: convention is "{bucket}:{key-prefix}".
-#[allow(dead_code)]
-pub(crate) async fn kv_set_encrypted<T: serde::Serialize>(
-    store_name: &str,
-    key: &str,
-    value: &T,
-    context: &str,
-) -> Result<(), String> {
-    let json_bytes = serde_json::to_vec(value).map_err(|e| format!("serialize: {e}"))?;
-    let envelope = crate::service_client::vault_encrypt(context, &json_bytes).await?;
-    kv_set_raw(store_name, key, &envelope).await
-}
-
-/// Read an envelope-encrypted value, deserialise the plaintext as JSON.
-#[allow(dead_code)]
-pub(crate) async fn kv_get_encrypted<T: serde::de::DeserializeOwned>(
-    store_name: &str,
-    key: &str,
-    context: &str,
-) -> Result<Option<T>, String> {
-    let Some(envelope) = kv_get_raw(store_name, key).await? else {
-        return Ok(None);
-    };
-    let plaintext = crate::service_client::vault_decrypt(context, &envelope).await?;
-    let val = serde_json::from_slice(&plaintext).map_err(|e| format!("deserialize: {e}"))?;
-    Ok(Some(val))
-}
-
-/// Read a value that may be stored either as legacy plaintext JSON or as an
-/// encrypted envelope.  Supports zero-downtime migration: plaintext records are
-/// returned as-is; encrypted records are decrypted transparently.
-///
-/// Detection heuristic: if the first byte is `{` (0x7B) or `[` (0x5B) or any
-/// printable ASCII (≥ 0x20) the record is treated as legacy plaintext JSON.
-/// Envelope records always start with a version byte < `ENVELOPE_VERSION_MAX_MIGRATION`.
-#[allow(dead_code)]
-pub(crate) async fn kv_get_maybe_encrypted<T: serde::de::DeserializeOwned>(
-    store_name: &str,
-    key: &str,
-    context: &str,
-) -> Result<Option<T>, String> {
-    let Some(raw) = kv_get_raw(store_name, key).await? else {
-        return Ok(None);
-    };
-    let first = raw.first().copied().unwrap_or(0);
-    let is_plaintext = first >= ENVELOPE_VERSION_MAX_MIGRATION;
-    let plaintext_bytes: Vec<u8> = if is_plaintext {
-        raw
-    } else {
-        crate::service_client::vault_decrypt(context, &raw).await?
-    };
-    let val = serde_json::from_slice(&plaintext_bytes).map_err(|e| format!("deserialize: {e}"))?;
-    Ok(Some(val))
-}
-
 async fn kv_list_keys(store_name: &str) -> Result<Vec<String>, String> {
     let mut all_keys = Vec::new();
     let mut cursor: Option<String> = None;
