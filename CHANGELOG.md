@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.5] - 2026-05-06
+
+- **Data epoch in consistency cookie**: The `__lid_cr` cookie (and
+  `x-lid-consistency` header) now includes a `data_epoch` identifier from
+  lattice-db. When NATS data is wiped or restored to an earlier point, the
+  epoch changes and stale cookies are silently discarded instead of causing
+  "stale replica" errors for users. Cookie format changed from
+  `{"table":rev}` to `{"e":"<epoch>","r":{"table":rev}}` (legacy format
+  without epoch is still accepted).
+
+### Removed
+
+- **Dead vault/encryption code**: Removed `vault.rs` (351 lines), encryption
+  helpers in `store.rs` and `service_client.rs`, and `aes-gcm`/`hkdf` crate
+  dependencies. Encryption now lives in lattice-db v1.9.0 (per-table opt-in).
+
 ## [1.5.4] - 2026-05-05
 
 ### Fixed

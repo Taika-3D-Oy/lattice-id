@@ -117,7 +117,9 @@ async fn handle_request(
     // ── Session consistency: seed from inbound header or cookie ──
     // Header `x-lid-consistency` takes priority (API clients).
     // Cookie `__lid_cr` is the browser fallback (auto round-tripped).
-    let inbound_revisions = req
+    // Format: {"e":"<epoch>","r":{"table":rev,...}}
+    // Legacy format (no epoch): {"table":rev,...} — accepted but epoch validation skipped.
+    let raw_consistency = req
         .headers()
         .get("x-lid-consistency")
         .and_then(|v| v.to_str().ok())
@@ -130,10 +132,24 @@ async fn handle_request(
                 .map(|c| c.trim())
                 .find(|c| c.starts_with("__lid_cr="))
                 .and_then(|c| c.strip_prefix("__lid_cr="))
-        })
-        .and_then(|raw| serde_json::from_str::<std::collections::HashMap<String, u64>>(raw).ok());
-    if let Some(revisions) = inbound_revisions {
-        store::seed_session_revisions(revisions);
+        });
+    if let Some(raw) = raw_consistency {
+        if let Ok(envelope) = serde_json::from_str::<serde_json::Value>(raw) {
+            if let Some(revisions_obj) = envelope.get("r").and_then(|r| r.as_object()) {
+                // New format with epoch
+                let epoch = envelope.get("e").and_then(|e| e.as_str()).map(|s| s.to_string());
+                let revisions: std::collections::HashMap<String, u64> = revisions_obj
+                    .iter()
+                    .filter_map(|(k, v)| v.as_u64().map(|r| (k.clone(), r)))
+                    .collect();
+                store::seed_session_revisions(revisions, epoch);
+            } else if let Ok(revisions) =
+                serde_json::from_value::<std::collections::HashMap<String, u64>>(envelope)
+            {
+                // Legacy format (no epoch) — accept without epoch validation
+                store::seed_session_revisions(revisions, None);
+            }
+        }
     }
 
     let req_origin = req
@@ -175,7 +191,14 @@ async fn handle_request(
         let revisions = store::get_session_revisions();
         if !revisions.is_empty() {
             let (mut parts, body) = resp.into_parts();
-            if let Ok(json) = serde_json::to_string(&revisions) {
+            // Build envelope: {"e":"<epoch>","r":{"table":rev,...}}
+            let epoch = store::get_session_epoch();
+            let envelope = if let Some(ref e) = epoch {
+                serde_json::json!({"e": e, "r": revisions})
+            } else {
+                serde_json::json!({"r": revisions})
+            };
+            if let Ok(json) = serde_json::to_string(&envelope) {
                 // Header for API clients
                 if let Ok(val) = json.parse() {
                     parts.headers.insert("x-lid-consistency", val);

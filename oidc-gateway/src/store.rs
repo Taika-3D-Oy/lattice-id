@@ -12,12 +12,25 @@ thread_local! {
 // Tracks per-table revision watermarks within a single request lifetime.
 // Reads inject `consistency.min_revision`; write responses update the map
 // from `session.revisions`.
+//
+// The data epoch prevents stale cookies from causing errors after a NATS data
+// wipe/restore. If the cookie's epoch doesn't match the server's epoch, the
+// seeded revisions are discarded on the first response.
 thread_local! {
     static SESSION_REVISIONS: RefCell<HashMap<String, u64>> = RefCell::new(HashMap::new());
+    /// Epoch from the inbound cookie/header (may be stale).
+    static INBOUND_EPOCH: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// Epoch from the latest lattice-db response (authoritative).
+    static SERVER_EPOCH: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// Set to true once we've validated inbound epoch against server epoch.
+    static EPOCH_VALIDATED: RefCell<bool> = const { RefCell::new(false) };
 }
 
 /// Seed session revisions from an external source (e.g. inbound consistency cookie/header).
-pub fn seed_session_revisions(revisions: HashMap<String, u64>) {
+pub fn seed_session_revisions(revisions: HashMap<String, u64>, epoch: Option<String>) {
+    INBOUND_EPOCH.with(|ie| {
+        *ie.borrow_mut() = epoch;
+    });
     SESSION_REVISIONS.with(|sr| {
         let mut map = sr.borrow_mut();
         for (table, rev) in revisions {
@@ -29,9 +42,35 @@ pub fn seed_session_revisions(revisions: HashMap<String, u64>) {
     });
 }
 
+/// Called after receiving a response with a server epoch. If the inbound epoch
+/// doesn't match, clear all seeded revisions (they're from a different dataset).
+fn validate_epoch(server_epoch: &str) {
+    SERVER_EPOCH.with(|se| {
+        *se.borrow_mut() = Some(server_epoch.to_string());
+    });
+    let already_validated = EPOCH_VALIDATED.with(|ev| *ev.borrow());
+    if already_validated {
+        return;
+    }
+    EPOCH_VALIDATED.with(|ev| *ev.borrow_mut() = true);
+
+    let inbound = INBOUND_EPOCH.with(|ie| ie.borrow().clone());
+    if let Some(inbound_epoch) = inbound {
+        if inbound_epoch != server_epoch {
+            // Epoch mismatch — data was wiped/restored. Discard stale revisions.
+            SESSION_REVISIONS.with(|sr| sr.borrow_mut().clear());
+        }
+    }
+}
+
 /// Export current session revisions so the gateway can propagate them to the caller.
 pub fn get_session_revisions() -> HashMap<String, u64> {
     SESSION_REVISIONS.with(|sr| sr.borrow().clone())
+}
+
+/// Export the current data epoch (from latest lattice-db response).
+pub fn get_session_epoch() -> Option<String> {
+    SERVER_EPOCH.with(|se| se.borrow().clone())
 }
 
 struct OidcConfigCache {
@@ -763,20 +802,24 @@ pub(crate) async fn ldb_request(
     }
 
     // Track session revisions for consistency.
-    if let Some(session) = val.get("session").and_then(|s| s.as_object())
-        && let Some(revisions) = session.get("revisions").and_then(|r| r.as_object())
-    {
-        SESSION_REVISIONS.with(|sr| {
-            let mut map = sr.borrow_mut();
-            for (table, rev_val) in revisions {
-                if let Some(rev) = rev_val.as_u64() {
-                    let entry = map.entry(table.clone()).or_insert(0);
-                    if rev > *entry {
-                        *entry = rev;
+    if let Some(session) = val.get("session").and_then(|s| s.as_object()) {
+        // Validate epoch — discards seeded revisions if data was wiped/restored.
+        if let Some(epoch) = session.get("epoch").and_then(|e| e.as_str()) {
+            validate_epoch(epoch);
+        }
+        if let Some(revisions) = session.get("revisions").and_then(|r| r.as_object()) {
+            SESSION_REVISIONS.with(|sr| {
+                let mut map = sr.borrow_mut();
+                for (table, rev_val) in revisions {
+                    if let Some(rev) = rev_val.as_u64() {
+                        let entry = map.entry(table.clone()).or_insert(0);
+                        if rev > *entry {
+                            *entry = rev;
+                        }
                     }
                 }
-            }
-        });
+            });
+        }
     }
 
     if let (Some(table), Some(revision)) = (
