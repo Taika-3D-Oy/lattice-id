@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.6] - 2026-05-07
+
+### Fixed
+
+- **Consent form CSP violation**: The "Allow access" button on the OAuth
+  consent page was blocked by the `form-action 'self'` Content-Security-Policy
+  directive when the page was delivered through a reverse proxy or CDN whose
+  public origin differed from the configured `issuer_url`. Fixed by:
+  1. Using an absolute form action (`{issuer_url}/consent`) so the POST always
+     targets the canonical issuer endpoint regardless of delivery origin.
+  2. Explicitly including the issuer URL in the CSP `form-action` directive
+     (`form-action 'self' {issuer_url}`) for an unambiguous, auditable policy.
+
 ## [1.5.5] - 2026-05-06
 
 - **Data epoch in consistency cookie**: The `__lid_cr` cookie (and
