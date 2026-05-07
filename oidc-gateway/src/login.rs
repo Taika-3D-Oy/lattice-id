@@ -807,6 +807,11 @@ pub async fn consent_page(
 
     let _ = scope_list; // suppress warning
 
+    // Use the canonical issuer URL as an absolute form action so the consent
+    // POST reaches the correct endpoint even when the page is served through a
+    // reverse proxy or CDN that has a different public origin.
+    let issuer = crate::util::html_escape(&crate::get_issuer());
+
     let html = format!(
         r#"<!DOCTYPE html>
 <html lang="en">
@@ -841,7 +846,7 @@ button{{flex:1;padding:12px;border:none;border-radius:8px;font-size:15px;font-we
 {scopes_html}
 </ul>
 
-<form method="POST" action="/consent">
+<form method="POST" action="{issuer}/consent">
 <input type="hidden" name="code" value="{code}">
 <input type="hidden" name="decision" value="approve">
 <div class="actions">

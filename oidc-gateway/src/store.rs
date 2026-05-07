@@ -572,7 +572,11 @@ pub fn hmac_email(email: &str) -> String {
                 .expect("HMAC accepts any key length");
             mac.update(email_lower.as_bytes());
             let result = mac.finalize();
-            result.into_bytes().iter().map(|b| format!("{b:02x}")).collect()
+            result
+                .into_bytes()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect()
         }
         _ => {
             let is_dev = config_value("dev_mode")
@@ -609,7 +613,11 @@ pub fn hmac_client_secret(secret: &str) -> String {
                 .expect("HMAC accepts any key length");
             mac.update(secret.as_bytes());
             let result = mac.finalize();
-            result.into_bytes().iter().map(|b| format!("{b:02x}")).collect()
+            result
+                .into_bytes()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect()
         }
         _ => {
             let is_dev = config_value("dev_mode")

@@ -905,7 +905,11 @@ async fn verify_client(
                 // Hash the provided secret with the same pepper used at creation time
                 // and compare against the stored HMAC hash.
                 let provided_hash = store::hmac_client_secret(provided);
-                if provided_hash.as_bytes().ct_eq(stored_hash.as_bytes()).into() {
+                if provided_hash
+                    .as_bytes()
+                    .ct_eq(stored_hash.as_bytes())
+                    .into()
+                {
                     Ok(client)
                 } else {
                     Err("invalid client_secret".into())

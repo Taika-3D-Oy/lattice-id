@@ -137,7 +137,10 @@ async fn handle_request(
         if let Ok(envelope) = serde_json::from_str::<serde_json::Value>(raw) {
             if let Some(revisions_obj) = envelope.get("r").and_then(|r| r.as_object()) {
                 // New format with epoch
-                let epoch = envelope.get("e").and_then(|e| e.as_str()).map(|s| s.to_string());
+                let epoch = envelope
+                    .get("e")
+                    .and_then(|e| e.as_str())
+                    .map(|s| s.to_string());
                 let revisions: std::collections::HashMap<String, u64> = revisions_obj
                     .iter()
                     .filter_map(|(k, v)| v.as_u64().map(|r| (k.clone(), r)))
@@ -1244,7 +1247,9 @@ fn serve_admin_asset(route_path: &str) -> Response<String> {
                 // TODO: migrate to `Response<Vec<u8>>` / `Response<Bytes>` to
                 // eliminate this formal unsoundness.
                 #[allow(unsafe_code)]
-                unsafe { String::from_utf8_unchecked(a.data) }
+                unsafe {
+                    String::from_utf8_unchecked(a.data)
+                }
             };
             // Cache static assets with content-addressed filenames aggressively.
             // Trunk emits `basename-<16 lowercase hex chars>.ext`; match that
@@ -1462,12 +1467,22 @@ async fn with_cors_and_security(
     // Task 1.10: Content-Security-Policy
     // Allow 'unsafe-inline' for script-src: login page passkey JS and account
     // page WebAuthn JS are inline scripts authored by gateway (not user-supplied).
-    parts.headers.insert(
-        "content-security-policy",
-        "default-src 'none'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self';"
-            .parse()
-            .unwrap(),
-    );
+    // Include the canonical issuer URL in form-action so the consent form POST
+    // is allowed even when the page is delivered via a reverse proxy or CDN
+    // whose public origin differs from the issuer URL.
+    {
+        let issuer = get_issuer();
+        let issuer_origin = issuer.trim_end_matches('/');
+        let csp = format!(
+            "default-src 'none'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; \
+             style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; \
+             frame-ancestors 'none'; base-uri 'none'; \
+             form-action 'self' {issuer_origin};"
+        );
+        parts
+            .headers
+            .insert("content-security-policy", csp.parse().unwrap());
+    }
 
     // Task 1.11: Strict-Transport-Security (off in dev mode)
     if !is_dev_mode() {
