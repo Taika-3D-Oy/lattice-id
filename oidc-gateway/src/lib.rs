@@ -1467,22 +1467,16 @@ async fn with_cors_and_security(
     // Task 1.10: Content-Security-Policy
     // Allow 'unsafe-inline' for script-src: login page passkey JS and account
     // page WebAuthn JS are inline scripts authored by gateway (not user-supplied).
-    // Include the canonical issuer URL in form-action so the consent form POST
-    // is allowed even when the page is delivered via a reverse proxy or CDN
-    // whose public origin differs from the issuer URL.
-    {
-        let issuer = get_issuer();
-        let issuer_origin = issuer.trim_end_matches('/');
-        let csp = format!(
-            "default-src 'none'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; \
-             style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; \
-             frame-ancestors 'none'; base-uri 'none'; \
-             form-action 'self' {issuer_origin};"
-        );
-        parts
-            .headers
-            .insert("content-security-policy", csp.parse().unwrap());
-    }
+    // Note: form-action is intentionally omitted. Chrome (unlike Firefox/Safari)
+    // checks form-action against redirect targets after form submission — the
+    // standard OAuth2 consent flow (POST /consent → 302 to client redirect_uri)
+    // would be blocked by `form-action 'self'`. All major OIDC providers omit it.
+    parts.headers.insert(
+        "content-security-policy",
+        "default-src 'none'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none';"
+            .parse()
+            .unwrap(),
+    );
 
     // Task 1.11: Strict-Transport-Security (off in dev mode)
     if !is_dev_mode() {

@@ -234,6 +234,13 @@ window.location.href = `${LATTICE_ID_URL}/authorize?` + new URLSearchParams({
 });
 ```
 
+### CSP Note For Localhost Redirect URIs
+
+If your app uses a localhost callback (for example `http://localhost:3001/callback`),
+the IdP consent flow still works because Lattice-ID does not enforce CSP
+`form-action`. This avoids a Chrome-specific behavior where `form-action 'self'`
+can block the OAuth redirect target after a successful consent form POST.
+
 ### Callback Handler
 
 ```javascript

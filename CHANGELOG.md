@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.7] - 2026-05-07
+
+### Fixed
+
+- **OAuth consent redirect blocked in Chrome with localhost callback**: Chrome
+  enforces CSP `form-action` against cross-origin redirect targets after form
+  submission. In the OAuth flow (`POST /consent` -> `302` to client
+  `redirect_uri`), `form-action 'self'` could block redirects to
+  `http://localhost:*` even though consent POST itself was same-origin.
+  Resolved by removing `form-action` from the gateway CSP while keeping strict
+  defaults (`default-src 'none'`, explicit `script-src/style-src/img-src`,
+  `frame-ancestors 'none'`, `base-uri 'none'`).
+
 ## [1.5.6] - 2026-05-07
 
 ### Fixed
