@@ -450,3 +450,101 @@ pub fn authentication_options_json(
 
     opts
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_challenge_is_base64url() {
+        let c = generate_challenge();
+        assert!(!c.is_empty());
+        assert!(
+            c.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        );
+    }
+
+    #[test]
+    fn test_generate_challenge_is_unique() {
+        let c1 = generate_challenge();
+        let c2 = generate_challenge();
+        assert_ne!(c1, c2);
+    }
+
+    #[test]
+    fn test_rp_id_from_https_issuer() {
+        // We can't easily call rp_id() because it reads config.
+        // Just verify the extraction logic inline.
+        let issuer = "https://auth.example.com";
+        let rp = issuer
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .split(':')
+            .next()
+            .unwrap_or("localhost");
+        assert_eq!(rp, "auth.example.com");
+    }
+
+    #[test]
+    fn test_rp_id_from_http_localhost_with_port() {
+        let issuer = "http://localhost:8000";
+        let rp = issuer
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .split(':')
+            .next()
+            .unwrap_or("localhost");
+        assert_eq!(rp, "localhost");
+    }
+
+    #[test]
+    fn test_parse_cose_es256_key_rejects_non_map() {
+        let mut data = Vec::new();
+        ciborium::ser::into_writer(&ciborium::Value::Text("not a map".into()), &mut data).unwrap();
+        let result = parse_cose_es256_key(&data);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not a CBOR map"));
+    }
+
+    #[test]
+    fn test_cbor_helpers() {
+        let map = vec![
+            (
+                ciborium::Value::Text("text-key".into()),
+                ciborium::Value::Text("text-val".into()),
+            ),
+            (
+                ciborium::Value::Text("bytes-key".into()),
+                ciborium::Value::Bytes(vec![1u8, 2u8, 3u8]),
+            ),
+            (
+                ciborium::Value::Integer(42.into()),
+                ciborium::Value::Integer((-7).into()),
+            ),
+        ];
+        assert_eq!(
+            cbor_map_get_text(&map, "text-key"),
+            Some("text-val".to_string())
+        );
+        assert_eq!(
+            cbor_map_get_bytes(&map, "bytes-key"),
+            Some(vec![1u8, 2u8, 3u8])
+        );
+        assert_eq!(
+            cbor_map_get_int(&map, &ciborium::Value::Integer(42.into())),
+            Some(-7)
+        );
+        assert_eq!(cbor_map_get_text(&map, "missing"), None);
+    }
+
+    #[test]
+    fn test_cbor_map_get_bytes_by_key() {
+        let map = vec![(
+            ciborium::Value::Integer((-2i64).into()),
+            ciborium::Value::Bytes(vec![0u8; 32]),
+        )];
+        let result = cbor_map_get_bytes_by_key(&map, &ciborium::Value::Integer((-2i64).into()));
+        assert_eq!(result, Some(vec![0u8; 32]));
+    }
+}

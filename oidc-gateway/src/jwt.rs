@@ -141,3 +141,23 @@ pub fn verify(
 
     Err(last_err)
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_jwt_header_payload_encoding_roundtrip() {
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        let header = serde_json::json!({"alg": "RS256", "typ": "JWT", "kid": "test-kid"});
+        let claims = serde_json::json!({"sub": "user1", "iss": "test"});
+        let h = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
+        let p = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
+
+        // Decode and verify roundtrip
+        let h_decoded: serde_json::Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(&h).unwrap()).unwrap();
+        let p_decoded: serde_json::Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(&p).unwrap()).unwrap();
+        assert_eq!(h_decoded["alg"], "RS256");
+        assert_eq!(p_decoded["sub"], "user1");
+    }
+}

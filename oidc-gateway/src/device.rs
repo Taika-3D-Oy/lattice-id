@@ -225,7 +225,7 @@ pub async fn complete(_query: &str) -> Response<String> {
 }
 
 fn page_with_error(error: &str) -> Response<String> {
-    let escaped = html_escape(error);
+    let escaped = util::html_escape(error);
     let html = format!(
         r#"<!DOCTYPE html>
 <html lang="en">
@@ -281,9 +281,52 @@ fn generate_user_code() -> String {
     )
 }
 
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_user_code_format() {
+        let code = generate_user_code();
+        assert_eq!(code.len(), 9);
+        let parts: Vec<&str> = code.split('-').collect();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].len(), 4);
+        assert_eq!(parts[1].len(), 4);
+    }
+
+    #[test]
+    fn test_generate_user_code_uses_unambiguous_chars() {
+        let code = generate_user_code();
+        let allowed = "ACDEFGHJKMNPQRTVWXY2345679";
+        for ch in code.chars() {
+            if ch != '-' {
+                assert!(allowed.contains(ch), "unexpected char '{ch}' in user code");
+            }
+        }
+    }
+
+    #[test]
+    fn test_generate_user_code_is_unique() {
+        let c1 = generate_user_code();
+        let c2 = generate_user_code();
+        assert_ne!(c1, c2);
+    }
+
+    #[test]
+    fn test_page_with_error_renders_error_message() {
+        let resp = page_with_error("Custom error message");
+        assert_eq!(resp.status(), 200);
+        let body = resp.body();
+        assert!(body.contains("Device Activation"));
+        assert!(body.contains("Custom error message"));
+    }
+
+    #[test]
+    fn test_page_with_error_escapes_html() {
+        let resp = page_with_error("<script>alert('xss')</script>");
+        let body = resp.body();
+        assert!(!body.contains("<script>"));
+        assert!(body.contains("&lt;script&gt;"));
+    }
 }

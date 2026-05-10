@@ -6,7 +6,7 @@
 # lattice-db co-located as a service (TCP on 127.0.0.1:4080).
 # NATS (with JetStream) provides persistent storage for lattice-db.
 # The HTTP gateway is exposed on localhost:8000.
-# NATS client port is exposed on localhost:4222 for CLI testing.
+# NATS client port is exposed on localhost:4224 for CLI testing.
 #
 # Usage:
 #   bash deploy/deploy-local.sh            # full setup from scratch
@@ -68,8 +68,8 @@ if [[ "${1:-}" == "status" ]]; then
   kubectl get workloaddeployment 2>/dev/null || echo "No workloads"
   echo ""
   echo "--- Test ---"
-  echo "  curl http://localhost/healthz"
-  echo "  curl http://localhost/.well-known/openid-configuration"
+  echo "  curl http://localhost:8000/healthz"
+  echo "  curl http://localhost:8000/.well-known/openid-configuration"
   exit 0
 fi
 
@@ -262,15 +262,66 @@ kubectl wait --for=condition=available --timeout=120s \
   deployment --all 2>/dev/null || true
 
 # 5. Expose NATS on NodePort for host-side testing (optional)
-log "Patching NATS service to NodePort 30422"
+log "Patching NATS service to NodePort 30424"
 kubectl patch svc nats --type=json \
-  -p '[{"op":"replace","path":"/spec/type","value":"NodePort"},{"op":"add","path":"/spec/ports/0/nodePort","value":30422}]' \
+  -p '[{"op":"replace","path":"/spec/type","value":"NodePort"},{"op":"add","path":"/spec/ports/0/nodePort","value":30424}]' \
   2>/dev/null || true
 
-# Expose gateway on NodePort 80 so the Host header is bare 'localhost' (no :port suffix),
-# matching the workload's virtual-host config.
-log "Creating gateway-local NodePort=80"
+# Expose gateway on NodePort 8000 via nginx proxy that strips the port from
+# the Host header so wasmCloud's host-based routing matches "localhost" even
+# when the browser/curl sends "Host: localhost:8000".
+log "Creating nginx-proxy + gateway-local NodePort=8000"
 kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-proxy-config
+  namespace: default
+data:
+  nginx.conf: |
+    events {}
+    http {
+      server {
+        listen 8080;
+        location / {
+          proxy_pass http://runtime-gateway.default.svc.cluster.local:80;
+          # $host strips the port — "localhost:8000" → "localhost"
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-proxy
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx-proxy
+  template:
+    metadata:
+      labels:
+        app: nginx-proxy
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+      volumes:
+        - name: config
+          configMap:
+            name: nginx-proxy-config
+---
 apiVersion: v1
 kind: Service
 metadata:
@@ -279,13 +330,14 @@ metadata:
 spec:
   type: NodePort
   selector:
-    wasmcloud.com/name: runtime-gateway
+    app: nginx-proxy
   ports:
     - name: http
-      port: 80
-      targetPort: http
-      nodePort: 80
+      port: 8080
+      targetPort: 8080
+      nodePort: 8000
 EOF
+kubectl rollout status deploy/nginx-proxy --timeout=60s 2>/dev/null || true
 
 # 6. Patch host: custom wash (wasip3 support), insecure registry, data-nats → nats-data
 log "Patching host: image=wash:p3, insecure-registry, wasip3, data-nats→nats-data"
@@ -318,7 +370,7 @@ deploy_workloads
 # 9. Wait for health
 log "Waiting for lattice-id to become ready"
 for attempt in $(seq 1 60); do
-  if curl -sf http://localhost/healthz 2>/dev/null | grep -q ok; then
+  if curl -sf http://localhost:8000/healthz 2>/dev/null | grep -q ok; then
     break
   fi
   echo -n "."
@@ -326,7 +378,7 @@ for attempt in $(seq 1 60); do
 done
 echo ""
 
-if curl -sf http://localhost/healthz &>/dev/null; then
+if curl -sf http://localhost:8000/healthz &>/dev/null; then
   log "lattice-id is ready!"
 else
   log "WARNING: lattice-id not responding yet — check logs"
@@ -337,15 +389,15 @@ fi
 echo ""
 log "Local environment deployed!"
 echo ""
-  echo "  HTTP Gateway:  http://localhost"
-echo "  NATS:          nats://localhost:4222  (mTLS, add '127.0.0.1 nats' to /etc/hosts)"
+  echo "  HTTP Gateway:  http://localhost:8000"
+  echo "  NATS:          nats://localhost:4224  (add '127.0.0.1 nats' to /etc/hosts)"
 echo ""
 echo "  Quick test:"
-echo "    curl http://localhost/healthz"
-echo "    curl http://localhost/.well-known/openid-configuration"
+echo "    curl http://localhost:8000/healthz"
+echo "    curl http://localhost:8000/.well-known/openid-configuration"
 echo ""
 echo "  Integration tests:"
-echo "    BASE_URL=http://localhost bash tests/integration_protocol.sh"
+echo "    BASE_URL=http://localhost:8000 bash tests/integration_protocol.sh"
 echo ""
 echo "  Rebuild after code changes:"
 echo "    bash deploy/deploy-local.sh rebuild"

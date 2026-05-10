@@ -3,14 +3,13 @@ apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
   - role: control-plane
     extraPortMappings:
-      # Runtime gateway — port 80 so Host header is bare 'localhost' (no :port suffix),
-      # matching the workload's virtual-host config.
-      - containerPort: 80
-        hostPort: 80
+      # Runtime gateway — port 8000 (avoids conflicts with other local Kind clusters).
+      - containerPort: 8000
+        hostPort: 8000
         protocol: TCP
       # NATS client port (for host-side testing)
-      - containerPort: 30422
-        hostPort: 4222
+      - containerPort: 30424
+        hostPort: 4224
         protocol: TCP
 kubeadmConfigPatches:
   - |

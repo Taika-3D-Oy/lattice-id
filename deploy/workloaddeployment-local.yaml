@@ -30,7 +30,7 @@ spec:
           localResources:
             environment:
               config:
-                issuer_url: http://localhost
+                issuer_url: http://localhost:8000
         - name: password-hasher
           image: kind-registry:5000/lattice-id/password-hasher:dev
           maxInvocations: 8

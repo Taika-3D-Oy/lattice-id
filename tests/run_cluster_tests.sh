@@ -111,6 +111,8 @@ CLUSTER_TESTS=(
   integration_account
   integration_logout
   integration_backchannel
+  integration_sso
+  integration_concurrent
 )
 
 # ── Run tests ─────────────────────────────────────────────────
@@ -121,8 +123,14 @@ main() {
   local failures=()
 
   for test in "${CLUSTER_TESTS[@]}"; do
-    if [[ -n "$FILTER" ]] && [[ "$test" != *"$FILTER"* ]]; then
-      continue
+    if [[ -n "$FILTER" ]]; then
+      local matched=false
+      for f in $(echo "$FILTER" | tr ',' ' '); do
+        if [[ "$test" == *"$f"* ]]; then matched=true; break; fi
+      done
+      if ! $matched; then
+        continue
+      fi
     fi
 
     local script="$SCRIPT_DIR/${test}.sh"

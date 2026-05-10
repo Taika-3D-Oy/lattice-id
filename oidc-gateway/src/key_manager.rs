@@ -86,7 +86,7 @@ async fn load_from_db() -> Result<Option<StoredKey>, String> {
 }
 
 async fn generate_and_store() -> Result<StoredKey, String> {
-    let mut rng = rand_core::OsRng;
+    let mut rng = p256::elliptic_curve::rand_core::OsRng;
     let private_key =
         RsaPrivateKey::new(&mut rng, 2048).map_err(|e| format!("RSA gen failed: {e}"))?;
     let public_key = RsaPublicKey::from(&private_key);
@@ -154,7 +154,7 @@ async fn load_ec_from_db() -> Result<Option<StoredEcKey>, String> {
 }
 
 async fn generate_and_store_ec() -> Result<StoredEcKey, String> {
-    let sk = EcSigningKey::random(&mut rand_core::OsRng);
+    let sk = EcSigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
     let scalar_bytes: Vec<u8> = sk.to_bytes().to_vec();
     let vk = sk.verifying_key();
     let point = vk.to_encoded_point(false);

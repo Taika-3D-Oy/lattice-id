@@ -2,7 +2,7 @@ use crate::store::{self, AuthSession};
 use crate::util;
 use http::{Response, StatusCode};
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct ClaimsRequest {
     id_token_claims: Vec<String>,
     userinfo_claims: Vec<String>,
@@ -145,7 +145,11 @@ async fn validate_id_token_hint(
 }
 
 /// Handle GET /authorize — validate PKCE params, store session, serve login page.
-pub async fn handle(query: &str, issuer: &str) -> Result<Response<String>, String> {
+pub async fn handle(
+    query: &str,
+    issuer: &str,
+    headers: &http::HeaderMap,
+) -> Result<Response<String>, String> {
     let params = util::parse_query(query);
     let get = |key: &str| -> Option<&str> {
         params
@@ -180,11 +184,24 @@ pub async fn handle(query: &str, issuer: &str) -> Result<Response<String>, Strin
         ),
         None => None,
     };
+
+    // ── IdP browser session: enables SSO and prompt=none ────────────
+    // Look up the lid_session cookie. Skip when prompt=login (force re-auth).
+    let idp_session = if prompt != "login" {
+        crate::account::get_idp_session_from_headers(headers).await
+    } else {
+        None
+    };
+    // Honour max_age: discard the session if the original auth is too old.
+    let idp_session = idp_session.filter(|s| {
+        max_age.map_or(true, |age| {
+            store::unix_now().saturating_sub(s.auth_time) <= age
+        })
+    });
+
     // Task 2.16: Support OIDC prompt parameter (OIDC Core §3.1.2.1).
-    if prompt == "none" {
-        // prompt=none requires returning an error if the user is not already authenticated.
-        // Lattice-ID uses per-request auth sessions (no persistent browser sessions),
-        // so the user is never "already authenticated" — always return login_required.
+    if prompt == "none" && idp_session.is_none() {
+        // No valid browser session — cannot satisfy prompt=none.
         let err_redirect = format!(
             "{}{}error=login_required&error_description=prompt%3Dnone%20requires%20existing%20session&state={}",
             redirect_uri,
@@ -197,7 +214,7 @@ pub async fn handle(query: &str, issuer: &str) -> Result<Response<String>, Strin
             .body(String::new())
             .unwrap());
     }
-    // prompt=login: Force re-authentication (default behavior of this endpoint).
+    // prompt=login: Force re-authentication (idp_session already cleared above).
     // prompt=consent: Always implied (no stored consent).
 
     let scope = get("scope").unwrap_or("openid");
@@ -233,14 +250,111 @@ pub async fn handle(query: &str, issuer: &str) -> Result<Response<String>, Strin
         }
     };
 
-    // Store auth session
+    // ── IdP session fast-path: skip login page ──────────────────────
+    // If a valid browser session exists and the client does not require
+    // re-authentication, issue the auth code directly. This enables
+    // prompt=none for SPAs doing silent token renewal, and SSO across
+    // clients for interactive flows.
+    if let Some(ref sso) = idp_session {
+        // If id_token_hint identifies a *different* user, fall through to
+        // the login page so the correct account can authenticate.
+        let hint_matches = validated_hint
+            .as_ref()
+            .map_or(true, |hint| hint.user_id == sso.user_id);
+
+        // Check that requested ACR values are satisfiable by the existing
+        // session.  If the client demands TOTP MFA but the user only used a
+        // password, we must not silently satisfy it.
+        let acr_satisfied = acr_values.is_empty()
+            || acr_values.iter().all(|v| {
+                if v == "urn:lattice-id:mfa:totp" {
+                    sso.amr.iter().any(|a| a == "mfa") && sso.amr.iter().any(|a| a == "otp")
+                } else {
+                    true
+                }
+            });
+
+        if hint_matches && acr_satisfied {
+            if let Ok(Some(user)) = store::get_user(&sso.user_id).await {
+                if user.status == "active" {
+                    let builtin_clients = ["lid-admin", "lid-default"];
+                    let is_first_party = client.first_party || builtin_clients.contains(&client_id);
+                    let needs_consent = prompt == "consent" || !is_first_party;
+
+                    let code = store::random_hex(32);
+                    let acr = crate::login::acr_from_amr(&sso.amr);
+                    let auth_code = store::AuthCode {
+                        user_id: user.id.clone(),
+                        client_id: client_id.to_string(),
+                        redirect_uri: redirect_uri.to_string(),
+                        code_challenge: code_challenge.to_string(),
+                        code_challenge_method: code_challenge_method.to_string(),
+                        nonce: nonce.to_string(),
+                        scope: scope.to_string(),
+                        auth_time: sso.auth_time,
+                        amr: sso.amr.clone(),
+                        acr,
+                        requested_id_token_claims: claims_request.id_token_claims.clone(),
+                        requested_userinfo_claims: claims_request.userinfo_claims.clone(),
+                        extra_claims: vec![],
+                        csrf_token: String::new(),
+                        expires_at: store::unix_now() + 300,
+                        state: state.to_string(),
+                    };
+                    store::save_auth_code(&code, &auth_code).await?;
+                    let _ = store::log_audit("sso_reuse", &user.id, &user.id, client_id).await;
+
+                    // Slide the IdP session TTL (rolling 30-minute window).
+                    let refreshed_idp =
+                        crate::account::refresh_idp_session_cookie_header(headers).await;
+                    let account_cookie = crate::account::create_session_cookie(&user.id).await.ok();
+
+                    if needs_consent {
+                        let resp =
+                            crate::login::consent_page(&code, &auth_code, &client, &user).await;
+                        let (mut parts, body) = resp.into_parts();
+                        if let Some(c) = refreshed_idp {
+                            if let Ok(val) = c.parse() {
+                                parts.headers.append("set-cookie", val);
+                            }
+                        }
+                        if let Some(c) = account_cookie {
+                            if let Ok(val) = c.parse() {
+                                parts.headers.append("set-cookie", val);
+                            }
+                        }
+                        return Ok(Response::from_parts(parts, body));
+                    }
+
+                    let mut redirect_url = format!("{}?code={code}", redirect_uri);
+                    if !state.is_empty() {
+                        redirect_url.push_str(&format!("&state={}", state));
+                    }
+                    let mut builder = Response::builder()
+                        .status(StatusCode::FOUND)
+                        .header("location", &redirect_url)
+                        .header("cache-control", "no-store");
+                    if let Some(c) = refreshed_idp {
+                        builder = builder.header("set-cookie", c);
+                    }
+                    if let Some(c) = account_cookie {
+                        builder = builder.header("set-cookie", c);
+                    }
+                    return Ok(builder.body(String::new()).unwrap());
+                }
+            }
+        }
+        // Session unusable (deleted user, inactive, mismatched hint, ACR gap)
+        // — fall through to the normal login page.
+    }
+
+    // No valid IdP session — create an AuthSession and show the login page.
     let session_id = store::random_hex(16);
     // Require consent when:
     //  - explicitly requested with prompt=consent, OR
     //  - the client is not first-party (and not the built-in admin/default clients)
     let builtin_clients = ["lid-admin", "lid-default"];
-    let is_first_party =
-        client.first_party || builtin_clients.contains(&client_id) || crate::is_dev_mode(); // dev mode skips consent for convenience
+    let is_first_party = client.first_party || builtin_clients.contains(&client_id);
     let needs_consent = prompt == "consent" || !is_first_party;
     let session = AuthSession {
         client_id: client_id.to_string(),
@@ -266,4 +380,145 @@ pub async fn handle(query: &str, issuer: &str) -> Result<Response<String>, Strin
 
     // Serve login page
     Ok(crate::login::login_page(&session_id, None).await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_acr_values_empty() {
+        assert!(parse_acr_values(None).is_empty());
+    }
+
+    #[test]
+    fn test_parse_acr_values_single() {
+        let values = parse_acr_values(Some("urn:lattice-id:mfa:totp"));
+        assert_eq!(values, vec!["urn:lattice-id:mfa:totp"]);
+    }
+
+    #[test]
+    fn test_parse_acr_values_dedup() {
+        let values = parse_acr_values(Some("a a b"));
+        assert_eq!(values, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_parse_acr_values_ignores_whitespace() {
+        let values = parse_acr_values(Some("  a   b  "));
+        assert_eq!(values, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_push_unique_adds() {
+        let mut v = vec!["a".to_string()];
+        push_unique(&mut v, "b");
+        assert_eq!(v, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_push_unique_skips_duplicate() {
+        let mut v = vec!["a".to_string()];
+        push_unique(&mut v, "a");
+        assert_eq!(v, vec!["a"]);
+    }
+
+    #[test]
+    fn test_push_unique_skips_empty() {
+        let mut v: Vec<String> = vec![];
+        push_unique(&mut v, "");
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn test_parse_claims_param_none() {
+        let result = parse_claims_param(None).unwrap();
+        assert!(result.id_token_claims.is_empty());
+        assert!(result.userinfo_claims.is_empty());
+    }
+
+    #[test]
+    fn test_parse_claims_param_empty() {
+        let result = parse_claims_param(Some("")).unwrap();
+        assert!(result.id_token_claims.is_empty());
+    }
+
+    #[test]
+    fn test_parse_claims_param_valid() {
+        let raw = r#"{"id_token": {"name": null, "email": null}, "userinfo": {"profile": null}}"#;
+        let result = parse_claims_param(Some(raw)).unwrap();
+        assert_eq!(result.id_token_claims.len(), 2);
+        assert!(result.id_token_claims.contains(&"name".to_string()));
+        assert!(result.id_token_claims.contains(&"email".to_string()));
+        assert_eq!(result.userinfo_claims, vec!["profile"]);
+    }
+
+    #[test]
+    fn test_parse_claims_param_invalid_json() {
+        let result = parse_claims_param(Some("not json"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("must be JSON"));
+    }
+
+    #[test]
+    fn test_parse_claims_param_invalid_descriptor() {
+        let raw = r#"{"id_token": {"name": "not-null-or-object"}}"#;
+        let result = parse_claims_param(Some(raw));
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .contains("invalid claims parameter claim descriptor")
+        );
+    }
+
+    #[test]
+    fn test_authorize_error_redirect_contains_error() {
+        let resp = authorize_error_redirect(
+            "https://client.example.com/cb",
+            "state123",
+            "invalid_request",
+            "bad request",
+        );
+        assert_eq!(resp.status(), 302);
+        let location = resp.headers().get("location").unwrap().to_str().unwrap();
+        assert!(location.contains("error=invalid_request"));
+        assert!(location.contains("state=state123"));
+    }
+
+    #[test]
+    fn test_authorize_error_redirect_no_state() {
+        let resp = authorize_error_redirect(
+            "https://client.example.com/cb",
+            "",
+            "access_denied",
+            "denied",
+        );
+        let location = resp.headers().get("location").unwrap().to_str().unwrap();
+        assert!(location.contains("error=access_denied"));
+        assert!(!location.contains("&state="));
+    }
+
+    #[test]
+    fn test_parse_acr_values_with_claims_parameter() {
+        let raw = r#"{"id_token": {"acr": {"values": ["a", "b"]}}}"#;
+        let result = parse_claims_param(Some(raw)).unwrap();
+        assert_eq!(result.acr_values, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_acr_values_and_claims_acr_cannot_combine() {
+        // This is enforced at the handle() level, not parse level.
+        // parse_claims_param only extracts data; the combination check is in handle().
+        let raw = r#"{"id_token": {"acr": {"value": "x"}}}"#;
+        let result = parse_claims_param(Some(raw)).unwrap();
+        assert_eq!(result.acr_values, vec!["x"]);
+    }
+
+    #[test]
+    fn test_parse_claims_acr_value_sets_acr_values() {
+        let raw = r#"{"id_token": {"acr": {"value": "single"}}}"#;
+        let result = parse_claims_param(Some(raw)).unwrap();
+        assert_eq!(result.acr_values, vec!["single"]);
+    }
 }

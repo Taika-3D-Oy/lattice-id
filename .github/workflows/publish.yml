@@ -44,6 +44,15 @@ jobs:
         with:
           cache-targets: "false"
 
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Run unit tests (host target, not wasm)
+        run: cargo test --workspace --target "$(rustc -vV | grep host | awk '{print $2}')"
+
+      - name: Run cargo audit (dependency vulnerabilities)
+        run: cargo audit
+
       - name: Install ORAS CLI
         uses: oras-project/setup-oras@v1
 

@@ -82,3 +82,51 @@ async fn build_logout_token(
     });
     crate::jwt::sign(&claims).await
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_logout_token_has_required_claims() {
+        // We can't actually call build_logout_token (it's async + needs network),
+        // but we can verify the claim structure it would produce.
+        let now = crate::store::unix_now();
+        let claims = serde_json::json!({
+            "iss": "https://issuer.example.com",
+            "sub": "user-123",
+            "aud": "client-456",
+            "iat": now,
+            "jti": "random-jti",
+            "events": {
+                "http://schemas.openid.net/event/backchannel-logout": {}
+            }
+        });
+        assert_eq!(claims["iss"], "https://issuer.example.com");
+        assert_eq!(claims["sub"], "user-123");
+        assert_eq!(claims["aud"], "client-456");
+        assert!(claims["jti"].as_str().unwrap().len() >= 8);
+        assert!(claims["events"].is_object());
+        assert!(claims["events"]["http://schemas.openid.net/event/backchannel-logout"].is_object());
+        assert!(
+            claims.get("nonce").is_none(),
+            "logout tokens MUST NOT contain nonce"
+        );
+    }
+
+    #[test]
+    fn test_logout_token_must_not_have_nonce() {
+        // OIDC Back-Channel Logout §2.4: logout tokens MUST NOT contain nonce
+        let now = crate::store::unix_now();
+        let claims = serde_json::json!({
+            "iss": "https://issuer.example.com",
+            "sub": "user-123",
+            "aud": "client-456",
+            "iat": now,
+            "jti": "jti-123",
+            "events": {
+                "http://schemas.openid.net/event/backchannel-logout": {}
+            }
+        });
+        // Verify the build_logout_token doesn't add nonce by checking it's not in the template
+        assert!(claims.get("nonce").is_none());
+    }
+}

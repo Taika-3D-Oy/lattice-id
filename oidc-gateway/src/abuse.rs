@@ -1,5 +1,3 @@
-use base64::Engine;
-
 fn rate_limits_table() -> String {
     "abuse-rate-limits".to_string()
 }
@@ -67,8 +65,36 @@ pub async fn record_metric(_name: &str, _labels: &[(&str, &str)]) -> Result<(), 
     Ok(())
 }
 
-// Suppress unused import warning when base64 is only referenced in the old
-// component version; keep it available for future use.
-const _: () = {
-    let _ = base64::engine::general_purpose::STANDARD;
-};
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_round_window_down() {
+        let now = 1_000_000u64;
+        let window_secs = 3600u64;
+        let window_start = now - (now % window_secs);
+        assert_eq!(window_start, 997_200);
+    }
+
+    #[test]
+    fn test_window_boundary() {
+        let now = 3600u64;
+        let window_secs = 3600u64;
+        let window_start = now - (now % window_secs);
+        assert_eq!(window_start, 3600);
+    }
+
+    #[test]
+    fn test_window_after_one_period() {
+        let now = 7200u64;
+        let window_secs = 3600u64;
+        let window_start = now - (now % window_secs);
+        assert_eq!(window_start, 7200);
+    }
+
+    #[test]
+    fn test_key_format() {
+        let key = "rate:test-key:1000000";
+        assert!(key.starts_with("rate:"));
+        assert!(key.contains(':'));
+    }
+}

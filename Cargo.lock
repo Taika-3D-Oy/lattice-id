@@ -253,7 +253,7 @@ dependencies = [
 
 [[package]]
 name = "email-worker"
-version = "1.5.6"
+version = "1.5.8"
 dependencies = [
  "bytes",
  "chrono",
@@ -601,7 +601,7 @@ dependencies = [
 
 [[package]]
 name = "oidc-gateway"
-version = "1.5.6"
+version = "1.5.8"
 dependencies = [
  "base64",
  "bytes",
@@ -612,7 +612,6 @@ dependencies = [
  "http-body",
  "num-bigint-dig",
  "p256",
- "rand_core",
  "rhai",
  "rsa",
  "serde",
@@ -658,11 +657,10 @@ dependencies = [
 
 [[package]]
 name = "password-hasher"
-version = "1.5.6"
+version = "1.5.8"
 dependencies = [
  "argon2",
  "password-hash",
- "rand_core",
  "wit-bindgen",
 ]
 

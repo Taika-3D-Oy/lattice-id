@@ -346,7 +346,7 @@ async fn handle(
         (&Method::GET, "/version") => Ok(version_response()),
 
         // ── OIDC flow ───────────────────────────────────────
-        (&Method::GET, "/authorize") => authorize::handle(query, &issuer).await,
+        (&Method::GET, "/authorize") => authorize::handle(query, &issuer, &parts.headers).await,
 
         (&Method::POST, "/login") => {
             let body_bytes = read_body(body).await?;
@@ -379,7 +379,7 @@ async fn handle(
         }
 
         // ── Logout ──────────────────────────────────────────
-        (&Method::GET, "/logout") => handle_logout(query, auth).await,
+        (&Method::GET, "/logout") => handle_logout(query, auth, &parts.headers).await,
 
         // ── Token revocation ────────────────────────────────
         (&Method::POST, "/token/revoke") => {
@@ -390,7 +390,7 @@ async fn handle(
         // ── User registration ───────────────────────────────
         (&Method::POST, "/register") => {
             let body_bytes = read_body(body).await?;
-            handle_register(&body_bytes).await
+            handle_register(&body_bytes, remote_ip).await
         }
 
         // ── Password reset complete ──────────────────────────
@@ -758,7 +758,7 @@ async fn route_api(
     }
 }
 
-async fn handle_register(body_bytes: &[u8]) -> Result<Response<String>, String> {
+async fn handle_register(body_bytes: &[u8], remote_ip: &str) -> Result<Response<String>, String> {
     #[derive(serde::Deserialize)]
     struct RegisterReq {
         email: String,
@@ -777,8 +777,7 @@ async fn handle_register(body_bytes: &[u8]) -> Result<Response<String>, String> 
         ));
     }
 
-    // Rate limit registration: 3 attempts per hour per IP (well, just use a generic key for now if we don't have IP)
-    // Actually Task 1.4 says "per-IP or per-email". Let's use email for now as we don't have easy IP access yet.
+    // Rate limit registration: 3 per hour per email, 10 per hour per IP
     match crate::service_client::check_rate(
         &format!("register:{}", req.email.to_lowercase()),
         3,
@@ -789,8 +788,19 @@ async fn handle_register(body_bytes: &[u8]) -> Result<Response<String>, String> 
         Ok((false, _)) => {
             return Err("too many registration attempts. please try again later.".into());
         }
-        Err(e) => logger::error_message("rate_limit.register_check_failed", e),
+        Err(e) => logger::error_message("rate_limit.register_email_check_failed", e),
         _ => {}
+    }
+    if remote_ip != "unknown" {
+        match crate::service_client::check_rate(&format!("register_ip:{remote_ip}"), 100, 3600)
+            .await
+        {
+            Ok((false, _)) => {
+                return Err("too many registration attempts. please try again later.".into());
+            }
+            Err(e) => logger::error_message("rate_limit.register_ip_check_failed", e),
+            _ => {}
+        }
     }
 
     if req.email.is_empty() || !req.email.contains('@') {
@@ -1025,7 +1035,11 @@ async fn handle_password_reset_complete(body_bytes: &[u8]) -> Result<Response<St
 }
 
 /// Handle GET /logout — RP-initiated logout (OIDC RP-Initiated Logout 1.0).
-async fn handle_logout(query: &str, auth: Option<&str>) -> Result<Response<String>, String> {
+async fn handle_logout(
+    query: &str,
+    auth: Option<&str>,
+    headers: &http::HeaderMap,
+) -> Result<Response<String>, String> {
     let params = util::parse_query(query);
 
     let id_token_hint = params
@@ -1069,6 +1083,13 @@ async fn handle_logout(query: &str, auth: Option<&str>) -> Result<Response<Strin
         let _ = store::log_audit("logout", sub, sub, "").await;
     }
 
+    // Delete the server-side IdP browser session so the lid_session cookie
+    // cannot be reused for prompt=none after logout, even if the browser
+    // ignores the Max-Age=0 clear directive.
+    if let Some(idp_token) = account::extract_idp_session_token(headers) {
+        let _ = store::delete_idp_session(&idp_token).await;
+    }
+
     // Redirect to post_logout_redirect_uri if provided, otherwise show confirmation.
     // RP-Initiated Logout 1.0: the URI must be registered with the *specific*
     // client identified by id_token_hint. If id_token_hint is missing or invalid,
@@ -1097,6 +1118,7 @@ async fn handle_logout(query: &str, auth: Option<&str>) -> Result<Response<Strin
                 .status(StatusCode::FOUND)
                 .header("location", &location)
                 .header("cache-control", "no-store")
+                .header("set-cookie", account::clear_idp_session_cookie())
                 .body(String::new())
                 .unwrap())
         }
@@ -1110,6 +1132,7 @@ async fn handle_logout(query: &str, auth: Option<&str>) -> Result<Response<Strin
                 .status(StatusCode::OK)
                 .header("content-type", "text/html; charset=utf-8")
                 .header("cache-control", "no-store")
+                .header("set-cookie", account::clear_idp_session_cookie())
                 .body(html.to_string())
                 .unwrap())
         }

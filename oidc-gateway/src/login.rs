@@ -39,6 +39,17 @@ fn select_acr(session: &store::AuthSession, amr: &[String]) -> Option<String> {
     None
 }
 
+/// Compute an ACR value from AMR claims alone (no full AuthSession needed).
+/// Used when re-authenticating via an existing IdP browser session.
+pub fn acr_from_amr(amr: &[String]) -> Option<String> {
+    let has_mfa = amr.iter().any(|v| v == "mfa") && amr.iter().any(|v| v == "otp");
+    if has_mfa {
+        Some(ACR_TOTP_MFA.to_string())
+    } else {
+        None
+    }
+}
+
 /// Default theme used when no client theme is configured.
 fn default_theme() -> ClientTheme {
     ClientTheme {
@@ -706,6 +717,12 @@ pub async fn complete_login_with_amr(
         if let Ok(cookie) = crate::account::create_session_cookie(&user.id).await {
             builder = builder.header("set-cookie", cookie);
         }
+        if let Ok(cookie) =
+            crate::account::create_idp_session_cookie(&user.id, &amr, crate::store::unix_now())
+                .await
+        {
+            builder = builder.header("set-cookie", cookie);
+        }
         return Ok(builder.body(String::new()).unwrap());
     }
 
@@ -726,6 +743,7 @@ pub async fn complete_login_with_amr(
         requested_id_token_claims: session.requested_id_token_claims.clone(),
         requested_userinfo_claims: session.requested_userinfo_claims.clone(),
         extra_claims: outcome.extra_claims.clone(),
+        csrf_token: crate::store::random_hex(16),
         expires_at: crate::store::unix_now() + 300,
         state: session.state.clone(),
     };
@@ -741,7 +759,19 @@ pub async fn complete_login_with_amr(
         let client = crate::store::get_client(&auth_code.client_id)
             .await?
             .unwrap_or_default();
-        return Ok(consent_page(&code, &auth_code, &client, &user).await);
+        // Set lid_session before the consent page so it is established even
+        // before the final redirect (the consent POST has no cookie to set).
+        let mut resp = consent_page(&code, &auth_code, &client, &user).await;
+        if let Ok(cookie) =
+            crate::account::create_idp_session_cookie(&user.id, &amr, auth_time).await
+        {
+            let (mut parts, body) = resp.into_parts();
+            if let Ok(val) = cookie.parse() {
+                parts.headers.append("set-cookie", val);
+            }
+            resp = Response::from_parts(parts, body);
+        }
+        return Ok(resp);
     }
 
     crate::store::save_auth_code(&code, &auth_code).await?;
@@ -759,8 +789,117 @@ pub async fn complete_login_with_amr(
     if let Ok(cookie) = crate::account::create_session_cookie(&user.id).await {
         builder = builder.header("set-cookie", cookie);
     }
+    // Set IdP session cookie for SSO / prompt=none support
+    if let Ok(cookie) = crate::account::create_idp_session_cookie(&user.id, &amr, auth_time).await {
+        builder = builder.header("set-cookie", cookie);
+    }
 
     Ok(builder.body(String::new()).unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_primary_amr_for_password() {
+        assert_eq!(primary_amr_for_flow("password"), vec!["pwd"]);
+    }
+
+    #[test]
+    fn test_primary_amr_for_unknown_flow() {
+        let amr: Vec<String> = Vec::new();
+        assert_eq!(primary_amr_for_flow("unknown"), amr);
+    }
+
+    #[test]
+    fn test_merge_amr_dedupes() {
+        let result = merge_amr(&["pwd".to_string()], &["mfa", "otp"]);
+        assert_eq!(result, vec!["pwd", "mfa", "otp"]);
+    }
+
+    #[test]
+    fn test_merge_amr_handles_empty_primary() {
+        let result = merge_amr(&[], &["mfa"]);
+        assert_eq!(result, vec!["mfa"]);
+    }
+
+    #[test]
+    fn test_select_acr_mfa() {
+        let session = store::AuthSession {
+            client_id: "test".into(),
+            redirect_uri: "http://localhost".into(),
+            code_challenge: "c".into(),
+            code_challenge_method: "S256".into(),
+            state: "s".into(),
+            scope: "openid".into(),
+            nonce: "n".into(),
+            max_age: None,
+            acr_values: vec![],
+            requested_id_token_claims: vec![],
+            requested_userinfo_claims: vec![],
+            hinted_user_id: None,
+            hinted_email: None,
+            created_at: 0,
+            needs_consent: false,
+        };
+        let amr = vec!["pwd".to_string(), "mfa".to_string(), "otp".to_string()];
+        assert_eq!(
+            select_acr(&session, &amr),
+            Some("urn:lattice-id:mfa:totp".to_string())
+        );
+    }
+
+    #[test]
+    fn test_select_acr_no_mfa() {
+        let session = store::AuthSession {
+            client_id: "test".into(),
+            redirect_uri: "http://localhost".into(),
+            code_challenge: "c".into(),
+            code_challenge_method: "S256".into(),
+            state: "s".into(),
+            scope: "openid".into(),
+            nonce: "n".into(),
+            max_age: None,
+            acr_values: vec![],
+            requested_id_token_claims: vec![],
+            requested_userinfo_claims: vec![],
+            hinted_user_id: None,
+            hinted_email: None,
+            created_at: 0,
+            needs_consent: false,
+        };
+        let amr = vec!["pwd".to_string()];
+        assert_eq!(select_acr(&session, &amr), None);
+    }
+
+    #[test]
+    fn test_darken_hex() {
+        let darkened = darken_hex("#2563eb");
+        assert!(darkened.starts_with('#'));
+        assert_eq!(darkened.len(), 7);
+    }
+
+    #[test]
+    fn test_darken_hex_invalid_fallback() {
+        let darkened = darken_hex("invalid");
+        assert_eq!(darkened, "#1d4ed8");
+    }
+
+    #[test]
+    fn test_acr_from_amr_with_mfa() {
+        let amr = vec!["pwd".to_string(), "mfa".to_string(), "otp".to_string()];
+        assert_eq!(
+            acr_from_amr(&amr),
+            Some("urn:lattice-id:mfa:totp".to_string())
+        );
+    }
+
+    #[test]
+    fn test_acr_from_amr_without_mfa() {
+        let amr = vec!["pwd".to_string()];
+        assert_eq!(acr_from_amr(&amr), None);
+    }
 }
 
 /// Darken a hex color by ~15% for hover states.
@@ -807,7 +946,7 @@ pub async fn consent_page(
 
     let _ = scope_list; // suppress warning
 
-
+    let csrf_token = crate::util::html_escape(&auth_code.csrf_token);
 
     let html = format!(
         r#"<!DOCTYPE html>
@@ -845,6 +984,7 @@ button{{flex:1;padding:12px;border:none;border-radius:8px;font-size:15px;font-we
 
 <form method="POST" action="/consent">
 <input type="hidden" name="code" value="{code}">
+<input type="hidden" name="csrf_token" value="{csrf_token}">
 <input type="hidden" name="decision" value="approve">
 <div class="actions">
 <button type="submit" class="btn-approve" name="decision" value="approve">Allow access</button>
@@ -871,6 +1011,7 @@ button{{flex:1;padding:12px;border:none;border-radius:8px;font-size:15px;font-we
 pub async fn handle_consent(body_bytes: &[u8]) -> Result<Response<String>, String> {
     let form = crate::util::parse_form(body_bytes);
     let code = crate::util::form_value(&form, "code").ok_or("missing code")?;
+    let submitted_csrf = crate::util::form_value(&form, "csrf_token").unwrap_or("");
     let decision = crate::util::form_value(&form, "decision").unwrap_or("deny");
 
     let auth_code = crate::store::get_auth_code(code)
@@ -880,6 +1021,12 @@ pub async fn handle_consent(body_bytes: &[u8]) -> Result<Response<String>, Strin
     if crate::store::unix_now() > auth_code.expires_at {
         let _ = crate::store::delete_auth_code(code).await;
         return Err("authorisation code expired".into());
+    }
+    if decision == "approve"
+        && !auth_code.csrf_token.is_empty()
+        && submitted_csrf != auth_code.csrf_token
+    {
+        return Err("invalid CSRF token".into());
     }
 
     if decision != "approve" {

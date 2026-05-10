@@ -90,7 +90,15 @@ main() {
   [[ -n "$admin_token" ]] || fail "no admin token"
 
   # ── Register backchannel client ────────────────────────────────────────────
-  local bc_logout_uri="http://localhost:${LISTENER_PORT}/bc-logout"
+  # When running inside a Kind cluster the wasmCloud component's outgoing HTTP
+  # goes through the pod's network stack, so "localhost" resolves to the pod
+  # loopback — not the host machine. On macOS Docker-for-Mac/Kind we can use
+  # host.docker.internal to reach the host instead.
+  local backchannel_host="localhost"
+  if [[ -n "${KUBE_CTX_FLAG:-}" ]]; then
+    backchannel_host="host.docker.internal"
+  fi
+  local bc_logout_uri="http://${backchannel_host}:${LISTENER_PORT}/bc-logout"
   local client_resp
   client_resp=$(curl -s -X POST "$BASE_URL/api/clients" \
     -H "Authorization: Bearer $admin_token" \

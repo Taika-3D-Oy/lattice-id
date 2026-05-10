@@ -1,0 +1,6 @@
+[advisories]
+# RUSTSEC-2023-0071: Marvin Attack — timing sidechannel in RSA PKCS#1 v1.5.
+# Low risk here: lattice-id uses RSA only for JWT signing (RS256), not
+# encryption/decryption. The Marvin Attack targets PKCS#1 v1.5 encryption
+# padding oracle, not the signature padding path. No fix upstream yet.
+ignore = ["RUSTSEC-2023-0071"]

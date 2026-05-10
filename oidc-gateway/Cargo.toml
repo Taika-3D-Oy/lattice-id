@@ -29,4 +29,3 @@ subtle = { version = "2.5", default-features = false }
 rhai = { version = "1", default-features = false, features = ["std"] }
 p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
 ciborium = { version = "0.2", default-features = false }
-rand_core = { version = "0.6", features = ["getrandom"] }

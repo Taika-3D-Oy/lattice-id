@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.8] - 2026-05-10
+
+### Added
+
+- **IdP browser session (SSO / prompt=none support)**: New `lid_session` cookie
+  enables silent authentication for SPAs (`prompt=none`) and cross-client SSO.
+  `lid_session` is set after every successful login, cleared on logout, and
+  validated on each `/authorize` call with a 30-minute sliding TTL.
+- **`acr_from_amr` helper**: Derives an ACR value from AMR claims for use in
+  the IdP session fast-path.
+- **Consent form CSRF protection**: Defense-in-depth CSRF token added to the
+  consent form (`POST /consent`). Enforced for approve decisions only (deny has
+  no security value).
+- **IP-based rate limiting on `/register`**: 100 registration attempts per hour
+  per source IP, alongside the existing per-email limit.
+- **Unit tests**: 30+ new tests across `abuse`, `token`, `jwt`, `authorize`,
+  `login`, `passkeys`, `backchannel`, and `device` modules (104 total).
+- **Integration tests**: New `integration_concurrent` (CAS race-condition
+  safety), `integration_sso` (browser session / prompt / SSO flow).
+
+### Changed
+
+- **`dev_mode` no longer skips consent for non-first-party clients**: Consent
+  is now always required for third-party clients, even in dev mode.
+- **Port 8000 for local deployment**: Changed from port 80 to 8000 to avoid
+  conflicts with other local Kind clusters. Uses nginx proxy to preserve
+  `Host` header for wasmCloud's virtual-host routing.
+- **Removed direct `rand_core` dependency**: Uses `p256::elliptic_curve::rand_core`
+  re-export instead, matching the version used by the crypto crates.
+
+### Fixed
+
+- **CI runs `cargo test` and `cargo audit` before publish**: Tests and
+  dependency vulnerability scanning now block publishing broken or vulnerable
+  artifacts.
+- **`getrandom::getrandom` call sites**: No code changes needed — `getrandom`
+  0.3 is not supported on `wasm32-wasip3`, so left at 0.2.
+- **`require_email_verification: "false"` respected during registration**: The
+  registration handler reads the config value correctly to bypass email
+  verification.
+- **GDPR export test expectations**: `integration_account` test now matches
+  the API's consistent 400 response for non-existent users.
+
 ## [1.5.7] - 2026-05-07
 
 ### Fixed

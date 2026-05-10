@@ -287,6 +287,9 @@ pub struct AuthCode {
     #[serde(default)]
     pub extra_claims: Vec<(String, String)>,
     pub expires_at: u64,
+    /// CSRF token for the consent form (defense in depth).
+    #[serde(default)]
+    pub csrf_token: String,
     /// OAuth2 state param, carried through consent flow.
     #[serde(default)]
     pub state: String,
@@ -710,6 +713,7 @@ const TTL_CONSUMED_MARKER: u64 = 86400 * 30; // 30 days
 const TTL_REVOCATION_MARKER: u64 = 86400 * 30; // 30 days
 const TTL_MFA_PENDING: u64 = 300; // 5 min
 const TTL_ACCOUNT_SESSION: u64 = 1800; // 30 min
+const TTL_IDP_SESSION: u64 = 1800; // 30 min
 const TTL_PASSKEY_CHALLENGE: u64 = 300; // 5 min
 const TTL_LOCKOUT: u64 = 3600; // 1 hour (generous buffer over default 15 min lock)
 const TTL_INVITATION: u64 = 86400 * 7; // 7 days
@@ -2118,6 +2122,41 @@ pub async fn get_account_session(token: &str) -> Result<Option<AccountSession>, 
 
 pub async fn delete_account_session(token: &str) -> Result<(), String> {
     kv_delete(&sessions_store(), &format!("acct:{token}")).await
+}
+
+// ── IdP browser sessions (SSO, prompt=none) ─────────────────
+
+/// A short-lived IdP browser session used for SSO and silent token renewal.
+/// Created on login completion; enables `prompt=none` and skipping the login
+/// page for SPAs doing access-token refresh.
+#[derive(Serialize, Deserialize)]
+pub struct IdpSession {
+    pub user_id: String,
+    /// Unix timestamp of the original authentication (used for max_age checking).
+    pub auth_time: u64,
+    /// Session expiry (Unix).
+    pub expires_at: u64,
+    /// AMR values from the original authentication (e.g. ["pwd"], ["passkey"]).
+    #[serde(default)]
+    pub amr: Vec<String>,
+}
+
+pub async fn save_idp_session(token: &str, session: &IdpSession) -> Result<(), String> {
+    kv_set_ttl(
+        &sessions_store(),
+        &format!("idp:{token}"),
+        session,
+        TTL_IDP_SESSION,
+    )
+    .await
+}
+
+pub async fn get_idp_session(token: &str) -> Result<Option<IdpSession>, String> {
+    kv_get(&sessions_store(), &format!("idp:{token}")).await
+}
+
+pub async fn delete_idp_session(token: &str) -> Result<(), String> {
+    kv_delete(&sessions_store(), &format!("idp:{token}")).await
 }
 
 // ── Known IPs (suspicious login detection) ──────────────────

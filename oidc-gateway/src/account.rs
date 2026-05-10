@@ -103,6 +103,72 @@ fn redirect_to_login(msg: &str) -> Response<String> {
         .unwrap()
 }
 
+// ── IdP session cookie (SSO / prompt=none) ──────────────────
+
+const IDP_COOKIE_NAME: &str = "lid_session";
+const IDP_SESSION_TTL: u64 = 1800; // 30 min — matches TTL_IDP_SESSION in store
+
+/// Create a new IdP browser session and return the Set-Cookie header value.
+/// Called on every successful login; enables `prompt=none` and SSO for SPAs.
+pub async fn create_idp_session_cookie(
+    user_id: &str,
+    amr: &[String],
+    auth_time: u64,
+) -> Result<String, String> {
+    let token = store::random_hex(32);
+    let session = store::IdpSession {
+        user_id: user_id.to_string(),
+        auth_time,
+        expires_at: store::unix_now() + IDP_SESSION_TTL,
+        amr: amr.to_vec(),
+    };
+    store::save_idp_session(&token, &session).await?;
+    let secure = if crate::is_dev_mode() { "" } else { " Secure;" };
+    Ok(format!(
+        "{IDP_COOKIE_NAME}={token}; HttpOnly;{secure} SameSite=Lax; Path=/; Max-Age={IDP_SESSION_TTL}"
+    ))
+}
+
+/// Return the Set-Cookie header value that clears the IdP session cookie from the browser.
+pub fn clear_idp_session_cookie() -> String {
+    let secure = if crate::is_dev_mode() { "" } else { " Secure;" };
+    format!("{IDP_COOKIE_NAME}=; HttpOnly;{secure} SameSite=Lax; Path=/; Max-Age=0")
+}
+
+/// Extract the raw lid_session token from request cookies without validating it.
+/// Used by the logout handler to delete the server-side session from NATS.
+pub fn extract_idp_session_token(headers: &HeaderMap) -> Option<String> {
+    parse_cookie(headers, IDP_COOKIE_NAME)
+}
+
+/// Look up and validate the IdP session from request cookies.
+/// Returns `None` if the cookie is absent, the session is not found, or it has expired.
+pub async fn get_idp_session_from_headers(headers: &HeaderMap) -> Option<store::IdpSession> {
+    let token = parse_cookie(headers, IDP_COOKIE_NAME)?;
+    let session = store::get_idp_session(&token).await.ok()??;
+    if store::unix_now() > session.expires_at {
+        let _ = store::delete_idp_session(&token).await;
+        return None;
+    }
+    Some(session)
+}
+
+/// Slide the TTL of the existing IdP session and return a refreshed Set-Cookie header.
+/// Returns `None` if there is no valid session to refresh.
+pub async fn refresh_idp_session_cookie_header(headers: &HeaderMap) -> Option<String> {
+    let token = parse_cookie(headers, IDP_COOKIE_NAME)?;
+    let mut session = store::get_idp_session(&token).await.ok()??;
+    if store::unix_now() > session.expires_at {
+        return None;
+    }
+    session.expires_at = store::unix_now() + IDP_SESSION_TTL;
+    let _ = store::save_idp_session(&token, &session).await;
+    let secure = if crate::is_dev_mode() { "" } else { " Secure;" };
+    Some(format!(
+        "{IDP_COOKIE_NAME}={token}; HttpOnly;{secure} SameSite=Lax; Path=/; Max-Age={IDP_SESSION_TTL}"
+    ))
+}
+
 // ── Shared page chrome ──────────────────────────────────────
 
 fn page_head(title: &str) -> String {

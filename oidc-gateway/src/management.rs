@@ -1798,11 +1798,12 @@ pub async fn passkey_auth_complete(
         nonce: session.nonce.clone(),
         scope: session.scope.clone(),
         auth_time,
-        amr,
+        amr: amr.clone(),
         acr: None,
         requested_id_token_claims: session.requested_id_token_claims.clone(),
         requested_userinfo_claims: session.requested_userinfo_claims.clone(),
         extra_claims: outcome.extra_claims.clone(),
+        csrf_token: store::random_hex(16),
         expires_at: store::unix_now() + 300,
         state: session.state.clone(),
     };
@@ -1822,6 +1823,11 @@ pub async fn passkey_auth_complete(
         .status(StatusCode::OK)
         .header("content-type", "application/json");
     if let Ok(cookie_val) = crate::account::create_session_cookie(&final_user.id).await {
+        builder = builder.header("set-cookie", cookie_val);
+    }
+    if let Ok(cookie_val) =
+        crate::account::create_idp_session_cookie(&final_user.id, &amr, auth_time).await
+    {
         builder = builder.header("set-cookie", cookie_val);
     }
     Ok(builder.body(body_str.to_string()).unwrap())

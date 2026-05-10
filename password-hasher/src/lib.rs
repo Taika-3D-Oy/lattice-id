@@ -8,9 +8,9 @@ mod bindings {
 
 use bindings::exports::lattice_id::crypto::password::Guest;
 
+use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::{Algorithm, Argon2, Params, Version};
-use rand_core::OsRng;
 
 struct Component;
 

@@ -1070,3 +1070,112 @@ fn add_derived_profile_claim(claims: &mut serde_json::Value, user: &store::User,
         _ => {}
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_at_hash_is_deterministic() {
+        let token = "test-access-token";
+        let hash1 = super::compute_at_hash(token);
+        let hash2 = super::compute_at_hash(token);
+        assert_eq!(hash1, hash2);
+        assert!(!hash1.is_empty());
+    }
+
+    #[test]
+    fn test_at_hash_differs_for_different_tokens() {
+        let hash1 = super::compute_at_hash("token-a");
+        let hash2 = super::compute_at_hash("token-b");
+        assert_ne!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_at_hash_is_base64url() {
+        let hash = super::compute_at_hash("any-token");
+        assert!(
+            hash.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        );
+    }
+
+    #[test]
+    fn test_compute_at_hash_length() {
+        // SHA-256 truncates to left half = 16 bytes → base64url → 22 chars (no pad)
+        let hash = super::compute_at_hash("test");
+        assert_eq!(hash.len(), 22);
+    }
+
+    #[test]
+    fn test_hex_sha256_is_64_chars() {
+        let hash = super::hex_sha256("test-input");
+        assert_eq!(hash.len(), 64);
+        assert!(hash.bytes().all(|b| b.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_hex_sha256_is_deterministic() {
+        let hash1 = super::hex_sha256("same-input");
+        let hash2 = super::hex_sha256("same-input");
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_hex_sha256_differs_for_different_inputs() {
+        let hash1 = super::hex_sha256("input-a");
+        let hash2 = super::hex_sha256("input-b");
+        assert_ne!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_parse_basic_auth_valid() {
+        let encoded = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            "client-id:client-secret",
+        );
+        let result = super::parse_basic_auth(Some(&format!("Basic {encoded}")));
+        assert_eq!(
+            result,
+            Some(("client-id".to_string(), "client-secret".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_parse_basic_auth_missing_header() {
+        assert!(super::parse_basic_auth(None).is_none());
+    }
+
+    #[test]
+    fn test_parse_basic_auth_malformed() {
+        assert!(super::parse_basic_auth(Some("Bearer token")).is_none());
+    }
+
+    #[test]
+    fn test_token_error_response_format() {
+        let resp = super::token_error(http::StatusCode::BAD_REQUEST, "invalid_grant", "test error");
+        assert_eq!(resp.status(), 400);
+        let body: serde_json::Value = serde_json::from_slice(resp.body().as_bytes()).unwrap();
+        assert_eq!(body["error"], "invalid_grant");
+        assert_eq!(body["error_description"], "test error");
+    }
+
+    #[test]
+    fn test_verify_pkce_s256_valid() {
+        let verifier = "valid-code-verifier-32-chars-minimum-length!!";
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        use sha2::{Digest, Sha256};
+        let hash = Sha256::digest(verifier.as_bytes());
+        let challenge = URL_SAFE_NO_PAD.encode(hash);
+        assert!(super::verify_pkce(verifier, &challenge, "S256"));
+    }
+
+    #[test]
+    fn test_verify_pkce_wrong_verifier() {
+        let challenge = "some-challenge-value";
+        assert!(!super::verify_pkce("wrong-verifier", challenge, "S256"));
+    }
+
+    #[test]
+    fn test_verify_pkce_wrong_method() {
+        assert!(!super::verify_pkce("verifier", "challenge", "plain"));
+    }
+}
