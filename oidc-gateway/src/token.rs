@@ -124,7 +124,7 @@ async fn handle_code_exchange(
     };
 
     let code = get("code").ok_or("missing code")?;
-    let code_verifier = get("code_verifier").ok_or("missing code_verifier")?;
+    let code_verifier = get("code_verifier");
     let redirect_uri = get("redirect_uri").ok_or("missing redirect_uri")?;
     let client_id = get("client_id").ok_or("missing client_id")?;
     let client_secret = get("client_secret");
@@ -155,12 +155,20 @@ async fn handle_code_exchange(
     if store::unix_now() > auth_code.expires_at {
         return Err("authorization code expired".into());
     }
-    if !verify_pkce(
-        code_verifier,
-        &auth_code.code_challenge,
-        &auth_code.code_challenge_method,
-    ) {
-        return Err("PKCE verification failed".into());
+
+    // PKCE: required for public clients, optional for confidential clients
+    if !auth_code.code_challenge.is_empty() {
+        let verifier = code_verifier.ok_or("missing code_verifier (PKCE was initiated)")?;
+        if !verify_pkce(
+            verifier,
+            &auth_code.code_challenge,
+            &auth_code.code_challenge_method,
+        ) {
+            return Err("PKCE verification failed".into());
+        }
+    } else if client.client_secret.is_none() {
+        // Public client MUST have used PKCE
+        return Err("PKCE required for public clients".into());
     }
 
     // CAS: atomically consume the auth code (prevents double-spend)

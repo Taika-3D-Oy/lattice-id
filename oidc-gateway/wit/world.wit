@@ -4,7 +4,13 @@ world gateway {
     import lattice-id:crypto/password;
     import lattice-id:admin/assets;
     import wasi:config/store@0.2.0-rc.1;
-    import wasi:sockets/types@0.3.0-rc-2026-03-15;
+    import wasi:sockets/instance-network@0.2.2;
+    import wasi:sockets/tcp-create-socket@0.2.2;
+    import wasi:sockets/tcp@0.2.2;
     import wasmcloud:messaging/consumer@0.2.0;
     import lattice-id:notify/email;
+    import wasi:random/random@0.2.2;
+    import wasi:http/outgoing-handler@0.2.2;
+
+    export wasi:http/incoming-handler@0.2.2;
 }

@@ -239,24 +239,50 @@ async fn load_keys() -> Result<LoadedKeys, String> {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 pub async fn get_public_key() -> Result<String, String> {
-    let keys = load_keys().await?;
-    Ok(keys.rsa_jwk)
+    let rsa_stored = match load_from_db().await? {
+        Some(s) => s,
+        None => generate_and_store().await?,
+    };
+    Ok(serde_json::json!({
+        "kty": "RSA",
+        "use": "sig",
+        "alg": "RS256",
+        "kid": rsa_stored.kid,
+        "n": rsa_stored.n,
+        "e": rsa_stored.e,
+    }).to_string())
 }
 
 pub async fn get_public_keys() -> Result<String, String> {
-    let keys = load_keys().await?;
-    let arr = serde_json::json!([
-        serde_json::from_str::<serde_json::Value>(&keys.rsa_jwk)
-            .map_err(|e| format!("parse rsa jwk: {e}"))?,
-        serde_json::from_str::<serde_json::Value>(&keys.ec_jwk)
-            .map_err(|e| format!("parse ec jwk: {e}"))?
-    ]);
+    let rsa_stored = match load_from_db().await? {
+        Some(s) => s,
+        None => generate_and_store().await?,
+    };
+    let ec_stored = match load_ec_from_db().await? {
+        Some(s) => s,
+        None => generate_and_store_ec().await?,
+    };
+    let (_, ec_jwk) = stored_ec_to_parts(&ec_stored)?;
+    let rsa_val = serde_json::json!({
+        "kty": "RSA",
+        "use": "sig",
+        "alg": "RS256",
+        "kid": rsa_stored.kid,
+        "n": rsa_stored.n,
+        "e": rsa_stored.e,
+    });
+    let ec_val: serde_json::Value = serde_json::from_str(&ec_jwk)
+        .map_err(|e| format!("parse ec jwk: {e}"))?;
+    let arr = serde_json::json!([rsa_val, ec_val]);
     Ok(arr.to_string())
 }
 
 pub async fn get_kid() -> Result<String, String> {
-    let keys = load_keys().await?;
-    Ok(keys.kid)
+    let rsa_stored = match load_from_db().await? {
+        Some(s) => s,
+        None => generate_and_store().await?,
+    };
+    Ok(rsa_stored.kid)
 }
 
 pub async fn sign_jwt(header: String, payload: String) -> Result<String, String> {

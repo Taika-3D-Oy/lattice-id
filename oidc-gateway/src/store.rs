@@ -147,8 +147,7 @@ fn with_config<T>(f: impl FnOnce(&OidcConfigCache) -> T) -> T {
 }
 
 async fn config_value_async(key: &str) -> Option<String> {
-    crate::bindings::wasi::config::store::get(key.to_string())
-        .await
+    crate::bindings::wasi::config::store::get(key)
         .ok()
         .flatten()
         .map(|value| value.trim().to_string())
@@ -732,11 +731,6 @@ pub(crate) async fn ldb_request(
     op: &str,
     payload: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    use crate::bindings::wasi::sockets::types::{
-        IpAddressFamily, IpSocketAddress, Ipv4SocketAddress, TcpSocket,
-    };
-    use wit_bindgen::StreamResult;
-
     // Build payload with _op and consistency context.
     let mut payload = payload.clone();
     payload
@@ -754,100 +748,103 @@ pub(crate) async fn ldb_request(
         }
     }
 
-    let body = serde_json::to_vec(&payload).map_err(|e| format!("serialize: {e}"))?;
+    let payload_str = serde_json::to_string(&payload).map_err(|e| format!("serialize: {e}"))?;
+    let body = payload_str.as_bytes();
 
-    // Connect to local lattice-db service.
-    let socket =
-        TcpSocket::create(IpAddressFamily::Ipv4).map_err(|e| format!("tcp create: {e:?}"))?;
-    let addr = IpSocketAddress::Ipv4(Ipv4SocketAddress {
-        port: LDB_TCP_PORT,
-        address: (127, 0, 0, 1),
-    });
-    socket
-        .connect(addr)
-        .await
-        .map_err(|e| format!("tcp connect: {e:?}"))?;
-
-    let (mut rx, _rx_done) = socket.receive();
-    let (mut tx, tx_rx) = crate::bindings::wit_stream::new::<u8>();
-    let _send_fut = socket.send(tx_rx);
-
-    // Write request frame: [4 bytes length][payload]
-    let len_bytes = (body.len() as u32).to_be_bytes();
-    let mut frame = Vec::with_capacity(4 + body.len());
-    frame.extend_from_slice(&len_bytes);
-    frame.extend_from_slice(&body);
-    let remaining = tx.write_all(frame).await;
-    if !remaining.is_empty() {
-        return Err("tcp send failed".into());
-    }
-
-    // Read response frame: [4 bytes length][payload]
-    let mut buf = Vec::new();
-    while buf.len() < 4 {
-        let read_buf = Vec::with_capacity(4096);
-        let (status, data) = rx.read(read_buf).await;
-        match status {
-            StreamResult::Complete(0) => return Err("tcp read failed (length eof)".into()),
-            StreamResult::Complete(n) => buf.extend_from_slice(&data[..n]),
-            _ => return Err("tcp read failed (length)".into()),
-        }
-    }
-    let resp_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-    buf.drain(..4);
-
-    while buf.len() < resp_len {
-        let read_buf = Vec::with_capacity(4096);
-        let (status, data) = rx.read(read_buf).await;
-        match status {
-            StreamResult::Complete(0) => return Err("tcp read failed (body eof)".into()),
-            StreamResult::Complete(n) => buf.extend_from_slice(&data[..n]),
-            _ => return Err("tcp read failed (body)".into()),
-        }
-    }
-
+    // Send request via NATS messaging (wasmcloud:messaging/consumer)
+    let instance = config_value("ldb_instance").unwrap_or_else(|| "lid".to_string());
+    let subject = format!("{instance}.{op}");
+    let resp_msg = crate::bindings::wasmcloud::messaging::consumer::request(&subject, body, 5000)
+        .map_err(|e| format!("ldb_request error on {subject}: {e:?}"))?;
     let val: serde_json::Value =
-        serde_json::from_slice(&buf[..resp_len]).map_err(|e| format!("parse response: {e}"))?;
+        serde_json::from_slice(&resp_msg.body).map_err(|e| format!("parse response: {e}"))?;
 
     if let Some(err) = val.get("error").and_then(|v| v.as_str()) {
         return Err(err.to_string());
     }
 
     // Track session revisions for consistency.
-    if let Some(session) = val.get("session").and_then(|s| s.as_object()) {
-        // Validate epoch — discards seeded revisions if data was wiped/restored.
-        if let Some(epoch) = session.get("epoch").and_then(|e| e.as_str()) {
-            validate_epoch(epoch);
-        }
-        if let Some(revisions) = session.get("revisions").and_then(|r| r.as_object()) {
-            SESSION_REVISIONS.with(|sr| {
-                let mut map = sr.borrow_mut();
-                for (table, rev_val) in revisions {
-                    if let Some(rev) = rev_val.as_u64() {
-                        let entry = map.entry(table.clone()).or_insert(0);
-                        if rev > *entry {
-                            *entry = rev;
-                        }
-                    }
-                }
-            });
-        }
-    }
-
-    if let (Some(table), Some(revision)) = (
-        payload.get("table").and_then(|t| t.as_str()),
-        val.get("revision").and_then(|v| v.as_u64()),
-    ) {
+    if let Some(revisions) = val.get("revisions").and_then(|r| r.as_object()) {
         SESSION_REVISIONS.with(|sr| {
             let mut map = sr.borrow_mut();
-            let entry = map.entry(table.to_string()).or_insert(0);
-            if revision > *entry {
-                *entry = revision;
+            for (table, rev) in revisions {
+                if let Some(rev_u64) = rev.as_u64() {
+                    let entry = map.entry(table.clone()).or_insert(0);
+                    if rev_u64 > *entry {
+                        *entry = rev_u64;
+                    }
+                }
             }
         });
     }
 
+    if let Some(server_epoch) = val.get("epoch").and_then(|e| e.as_str()) {
+        validate_epoch(server_epoch);
+    }
+
     Ok(val)
+}
+
+async fn try_ldb_tcp(body: &[u8]) -> Result<serde_json::Value, String> {
+    use crate::bindings::wasi::sockets::instance_network::instance_network;
+    use crate::bindings::wasi::sockets::network::{
+        IpAddressFamily, IpSocketAddress, Ipv4SocketAddress,
+    };
+    use crate::bindings::wasi::sockets::tcp_create_socket::create_tcp_socket;
+
+    let network = instance_network();
+    let socket =
+        create_tcp_socket(IpAddressFamily::Ipv4).map_err(|e| format!("tcp create: {e:?}"))?;
+
+    let addr = IpSocketAddress::Ipv4(Ipv4SocketAddress {
+        port: LDB_TCP_PORT,
+        address: (127, 0, 0, 1),
+    });
+
+    socket
+        .start_connect(&network, addr)
+        .map_err(|e| format!("start_connect: {e:?}"))?;
+
+    let pollable = socket.subscribe();
+    pollable.block();
+    drop(pollable);
+
+    let (in_stream, out_stream) = socket
+        .finish_connect()
+        .map_err(|e| format!("finish_connect: {e:?}"))?;
+    std::mem::forget(socket);
+
+    // Write request frame: [4 bytes length][payload]
+    let len_bytes = (body.len() as u32).to_be_bytes();
+    let mut frame = Vec::with_capacity(4 + body.len());
+    frame.extend_from_slice(&len_bytes);
+    frame.extend_from_slice(body);
+
+    out_stream
+        .blocking_write_and_flush(&frame)
+        .map_err(|e| format!("tcp send: {e:?}"))?;
+
+    // Read response frame: [4 bytes length][payload]
+    let mut buf = Vec::new();
+    while buf.len() < 4 {
+        match in_stream.blocking_read(4 - buf.len() as u64) {
+            Ok(chunk) if !chunk.is_empty() => buf.extend_from_slice(&chunk),
+            _ => return Err("tcp read failed (length)".into()),
+        }
+    }
+    let resp_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+    buf.clear();
+
+    while buf.len() < resp_len {
+        let needed = (resp_len - buf.len()) as u64;
+        let to_read = needed.min(65536);
+        match in_stream.blocking_read(to_read) {
+            Ok(chunk) if !chunk.is_empty() => buf.extend_from_slice(&chunk),
+            _ => return Err("tcp read failed (body)".into()),
+        }
+    }
+
+    serde_json::from_slice(&buf).map_err(|e| format!("parse response: {e}"))
 }
 
 /// Check if a lattice-db error indicates "not found".

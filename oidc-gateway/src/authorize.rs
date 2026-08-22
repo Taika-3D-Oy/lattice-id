@@ -166,9 +166,9 @@ pub async fn handle(
 
     let client_id = get("client_id").ok_or("missing client_id")?;
     let redirect_uri = get("redirect_uri").ok_or("missing redirect_uri")?;
-    let code_challenge = get("code_challenge").ok_or("missing code_challenge (PKCE required)")?;
+    let code_challenge = get("code_challenge");
     let code_challenge_method = get("code_challenge_method").unwrap_or("S256");
-    if code_challenge_method != "S256" {
+    if code_challenge.is_some() && code_challenge_method != "S256" {
         return Err("only S256 code_challenge_method is supported".into());
     }
 
@@ -233,6 +233,11 @@ pub async fn handle(
         .await?
         .ok_or_else(|| format!("unknown client_id: {client_id}"))?;
 
+    // PKCE is required for public clients; optional for confidential clients
+    if client.client_secret.is_none() && code_challenge.is_none() {
+        return Err("missing code_challenge (PKCE required for public clients)".into());
+    }
+
     // Validate redirect_uri
     if !client.redirect_uris.iter().any(|u| u == redirect_uri) {
         return Err("redirect_uri not registered for this client".into());
@@ -287,7 +292,7 @@ pub async fn handle(
                         user_id: user.id.clone(),
                         client_id: client_id.to_string(),
                         redirect_uri: redirect_uri.to_string(),
-                        code_challenge: code_challenge.to_string(),
+                        code_challenge: code_challenge.unwrap_or("").to_string(),
                         code_challenge_method: code_challenge_method.to_string(),
                         nonce: nonce.to_string(),
                         scope: scope.to_string(),
@@ -359,7 +364,7 @@ pub async fn handle(
     let session = AuthSession {
         client_id: client_id.to_string(),
         redirect_uri: redirect_uri.to_string(),
-        code_challenge: code_challenge.to_string(),
+        code_challenge: code_challenge.unwrap_or("").to_string(),
         code_challenge_method: code_challenge_method.to_string(),
         state: state.to_string(),
         scope: scope.to_string(),

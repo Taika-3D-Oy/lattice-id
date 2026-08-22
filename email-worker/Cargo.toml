@@ -12,7 +12,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 wit-bindgen.workspace = true
-wasip3.workspace = true
 serde_json.workspace = true
 serde.workspace = true
 http.workspace = true
@@ -22,3 +21,4 @@ hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
 chrono = { version = "0.4", default-features = false, features = ["alloc"] }
+futures = { version = "0.3", default-features = false, features = ["executor"] }

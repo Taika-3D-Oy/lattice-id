@@ -55,10 +55,10 @@ pub async fn jwks() -> Response<String> {
             .body(serde_json::to_string(&jwks).unwrap_or_default())
             .unwrap(),
         Err(e) => {
-            crate::logger::error_message("jwks.fetch_failed", e);
+            crate::logger::error_message("jwks.fetch_failed", &e);
             crate::error_json(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "signing key service unavailable",
+                &format!("signing key service unavailable: {e}"),
             )
         }
     }

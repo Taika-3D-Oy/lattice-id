@@ -89,8 +89,10 @@ pub async fn get_jwks() -> Result<Value, String> {
                 serde_json::from_str(&keys_json).map_err(|e| format!("parse keys: {e}"))?;
             Ok(serde_json::json!({ "keys": keys }))
         }
-        Err(_) => {
-            let key_store = keys::KeyStore::load().await?;
+        Err(e) => {
+            let key_store = keys::KeyStore::load()
+                .await
+                .map_err(|e2| format!("{e} (fallback: {e2})"))?;
             Ok(key_store.jwks())
         }
     }
@@ -119,7 +121,7 @@ pub async fn increment_metric(name: &str, labels: &[(&str, &str)]) -> Result<(),
         body,
         reply_to: None,
     };
-    let _ = crate::bindings::wasmcloud::messaging::consumer::publish(msg).await;
+    let _ = crate::bindings::wasmcloud::messaging::consumer::publish(&msg);
     Ok(())
 }
 

@@ -231,6 +231,7 @@ dependencies = [
  "elliptic-curve",
  "rfc6979",
  "signature",
+ "spki",
 ]
 
 [[package]]
@@ -245,6 +246,7 @@ dependencies = [
  "ff",
  "generic-array",
  "group",
+ "pkcs8",
  "rand_core",
  "sec1",
  "subtle",
@@ -253,10 +255,11 @@ dependencies = [
 
 [[package]]
 name = "email-worker"
-version = "1.5.8"
+version = "1.6.0"
 dependencies = [
  "bytes",
  "chrono",
+ "futures",
  "hex",
  "hmac",
  "http",
@@ -264,7 +267,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "wasip3",
  "wit-bindgen",
 ]
 
@@ -601,17 +603,19 @@ dependencies = [
 
 [[package]]
 name = "oidc-gateway"
-version = "1.5.8"
+version = "1.6.0"
 dependencies = [
  "base64",
  "bytes",
  "ciborium",
+ "futures",
  "getrandom",
  "hmac",
  "http",
  "http-body",
  "num-bigint-dig",
  "p256",
+ "rand_core",
  "rhai",
  "rsa",
  "serde",
@@ -657,7 +661,7 @@ dependencies = [
 
 [[package]]
 name = "password-hasher"
-version = "1.5.8"
+version = "1.6.0"
 dependencies = [
  "argon2",
  "password-hash",
@@ -846,6 +850,7 @@ dependencies = [
  "base16ct",
  "der",
  "generic-array",
+ "pkcs8",
  "subtle",
  "zeroize",
 ]

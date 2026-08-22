@@ -1,9 +1,6 @@
 wit_bindgen::generate!({
     path: "wit",
     world: "worker",
-    async: [
-        "export:lattice-id:notify/email#send",
-    ],
     generate_all,
 });
 
@@ -28,7 +25,7 @@ fn cfg(key: &str) -> String {
 }
 
 impl exports::lattice_id::notify::email::Guest for Component {
-    async fn send(
+    fn send(
         event_type: String,
         to: String,
         name: String,
@@ -54,7 +51,7 @@ impl exports::lattice_id::notify::email::Guest for Component {
         let provider = cfg("email_provider");
 
         match provider.as_str() {
-            "ses" => ses::deliver(&event).await,
+            "ses" => futures::executor::block_on(ses::deliver(&event)),
             "log" | "" => deliver_log(&event),
             other => Err(format!("unknown email provider: '{other}'")),
         }
@@ -210,7 +207,6 @@ mod ses {
         let payload = serde_json::to_string(&body).map_err(|e| format!("json: {e}"))?;
 
         let host = format!("email.{region}.amazonaws.com");
-        let url = format!("https://{host}/v2/email/outbound-emails");
 
         let now = chrono::DateTime::from_timestamp(
             crate::wasi::clocks::wall_clock::now().seconds as i64,
@@ -242,25 +238,62 @@ mod ses {
             "AWS4-HMAC-SHA256 Credential={access_key}/{credential_scope}, SignedHeaders={signed_headers}, Signature={signature}"
         );
 
-        let request = http::Request::builder()
-            .method(http::Method::POST)
-            .uri(&url)
-            .header("content-type", "application/json")
-            .header("x-amz-date", &amz_date)
-            .header("x-amz-content-sha256", &payload_hash)
-            .header("authorization", &authorization)
-            .body(payload)
-            .map_err(|e| format!("build request: {e}"))?;
+        use crate::wasi::http::outgoing_handler;
+        use crate::wasi::http::types::{
+            Fields, Method, OutgoingBody, OutgoingRequest, RequestOptions, Scheme,
+        };
 
-        let wasi_request = wasip3::http_compat::http_into_wasi_request(request)
-            .map_err(|e| format!("build wasi request: {e:?}"))?;
-        let wasi_response = wasip3::http::client::send(wasi_request)
-            .await
-            .map_err(|e| format!("SES request failed: {e:?}"))?;
-        let response = wasip3::http_compat::http_from_wasi_response(wasi_response)
-            .map_err(|e| format!("parse response: {e:?}"))?;
+        let headers_vec: Vec<(String, Vec<u8>)> = vec![
+            ("content-type".to_string(), b"application/json".to_vec()),
+            ("x-amz-date".to_string(), amz_date.as_bytes().to_vec()),
+            (
+                "x-amz-content-sha256".to_string(),
+                payload_hash.as_bytes().to_vec(),
+            ),
+            ("authorization".to_string(), authorization.as_bytes().to_vec()),
+        ];
 
-        let status = response.status().as_u16();
+        let fields = Fields::from_list(&headers_vec).map_err(|e| format!("headers: {e:?}"))?;
+        let outgoing = OutgoingRequest::new(fields);
+        let _ = outgoing.set_method(&Method::Post);
+        let _ = outgoing.set_path_with_query(Some("/v2/email/outbound-emails"));
+        let _ = outgoing.set_authority(Some(&host));
+        let _ = outgoing.set_scheme(Some(&Scheme::Https));
+
+        if let Ok(out_body) = outgoing.body() {
+            if let Ok(stream) = out_body.write() {
+                let _ = stream.blocking_write_and_flush(payload.as_bytes());
+                drop(stream);
+            }
+            let _ = OutgoingBody::finish(out_body, None);
+        }
+
+        let opts = RequestOptions::new();
+        let fut = outgoing_handler::handle(outgoing, Some(opts))
+            .map_err(|e| format!("outgoing_handler: {e:?}"))?;
+        let pollable = fut.subscribe();
+        pollable.block();
+        drop(pollable);
+
+        let incoming = fut
+            .get()
+            .ok_or_else(|| "no response".to_string())?
+            .map_err(|e| format!("http error: {e:?}"))?
+            .map_err(|e| format!("response error: {e:?}"))?;
+
+        let status = incoming.status();
+        let mut body_bytes = Vec::new();
+        if let Ok(inc_body) = incoming.consume() {
+            if let Ok(in_stream) = inc_body.stream() {
+                loop {
+                    match in_stream.blocking_read(65536) {
+                        Ok(chunk) if !chunk.is_empty() => body_bytes.extend_from_slice(&chunk),
+                        _ => break,
+                    }
+                }
+            }
+        }
+
         if (200..300).contains(&status) {
             eprintln!(
                 "email-worker [SES]: sent {} to {}",
@@ -268,28 +301,9 @@ mod ses {
             );
             Ok(())
         } else {
-            // Read error body for diagnostics
-            let body_bytes = read_body(response.into_body()).await;
             let detail = String::from_utf8_lossy(&body_bytes);
             Err(format!("SES returned HTTP {status}: {detail}"))
         }
-    }
-
-    async fn read_body<B>(mut body: B) -> Vec<u8>
-    where
-        B: http_body::Body<Data = bytes::Bytes> + Unpin,
-        B::Error: std::fmt::Debug,
-    {
-        use std::future::poll_fn;
-        use std::pin::Pin;
-
-        let mut bytes = Vec::new();
-        while let Some(Ok(frame)) = poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await {
-            if let Some(data) = frame.data_ref() {
-                bytes.extend_from_slice(data);
-            }
-        }
-        bytes
     }
 
     fn hex_sha256(data: &[u8]) -> String {

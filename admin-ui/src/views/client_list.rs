@@ -17,6 +17,9 @@ pub fn ClientListView() -> impl IntoView {
     let (f_redirect, set_f_redirect) = signal(String::new());
     let (f_app_name, set_f_app_name) = signal(String::new());
     let (f_color, set_f_color) = signal(String::new());
+    let (f_confidential, set_f_confidential) = signal(false);
+    // Holds the generated secret shown once after creation
+    let (created_secret, set_created_secret) = signal(Option::<(String, String)>::None);
 
     // Fetch on mount
     let fetch = move || {
@@ -41,6 +44,7 @@ pub fn ClientListView() -> impl IntoView {
         let app_name = f_app_name.get_untracked();
         let color = f_color.get_untracked();
 
+        let confidential = f_confidential.get_untracked();
         let theme = if app_name.is_empty() {
             None
         } else {
@@ -55,11 +59,18 @@ pub fn ClientListView() -> impl IntoView {
             name,
             redirect_uris: redirect.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
             theme,
+            confidential,
         };
 
         wasm_bindgen_futures::spawn_local(async move {
             match api::create_client(&tok, &req).await {
                 Ok(client) => {
+                    if client.client_secret.is_some() {
+                        set_created_secret.set(Some((
+                            client.client_id.clone(),
+                            client.client_secret.clone().unwrap(),
+                        )));
+                    }
                     set_clients.update(|v| v.push(client));
                     set_success.set(Some("Client created".into()));
                     set_show_form.set(false);
@@ -67,6 +78,7 @@ pub fn ClientListView() -> impl IntoView {
                     set_f_redirect.set(String::new());
                     set_f_app_name.set(String::new());
                     set_f_color.set(String::new());
+                    set_f_confidential.set(false);
                 }
                 Err(e) => set_error.set(Some(e.0)),
             }
@@ -84,6 +96,25 @@ pub fn ClientListView() -> impl IntoView {
 
         {move || error.get().map(|e| view! { <p class="msg-error">{e}</p> })}
         {move || success.get().map(|m| view! { <p class="msg-success">{m}</p> })}
+
+        // Show generated secret once
+        {move || created_secret.get().map(|(cid, secret)| view! {
+            <div class="card" style="border: 2px solid var(--warning, #f59e0b); background: var(--bg-warning, #1c1917);">
+                <h2 style="margin-top:0">"Client Secret Created"</h2>
+                <p style="color: var(--warning, #f59e0b); font-weight: 600;">
+                    "Copy this secret now. It will not be shown again."
+                </p>
+                <div class="detail-grid">
+                    <span class="label">"Client ID"</span>
+                    <span class="value mono">{cid.clone()}</span>
+                    <span class="label">"Client Secret"</span>
+                    <span class="value mono">{secret.clone()}</span>
+                </div>
+                <div style="margin-top:12px">
+                    <button class="btn-primary" on:click=move |_| set_created_secret.set(None)>"Dismiss"</button>
+                </div>
+            </div>
+        })}
 
         // New client form
         {move || show_form.get().then(|| view! {
@@ -108,6 +139,23 @@ pub fn ClientListView() -> impl IntoView {
                     <label>"Primary Color"</label>
                     <input type="text" placeholder="#3b82f6" prop:value=f_color
                         on:input=move |ev| set_f_color.set(event_target_value(&ev))/>
+                </div>
+                <div class="form-row">
+                    <label>"Confidential Client"</label>
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                        <input type="checkbox"
+                            prop:checked=move || f_confidential.get()
+                            on:change=move |ev| {
+                                use wasm_bindgen::JsCast;
+                                let checked = ev.target()
+                                    .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok())
+                                    .map(|el| el.checked())
+                                    .unwrap_or(false);
+                                set_f_confidential.set(checked);
+                            }
+                        />
+                        "Generate a client secret (for server-side apps)"
+                    </label>
                 </div>
                 <div class="form-actions">
                     <button class="btn-primary" disabled=move || !form_valid.get()

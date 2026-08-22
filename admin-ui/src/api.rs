@@ -69,6 +69,8 @@ pub struct CreateClientRequest {
     pub redirect_uris: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub theme: Option<ClientTheme>,
+    #[serde(default)]
+    pub confidential: bool,
 }
 
 #[derive(Serialize)]

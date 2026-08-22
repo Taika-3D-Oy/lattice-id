@@ -2,16 +2,16 @@ pub mod bindings {
     wit_bindgen::generate!({
         world: "gateway",
         path: "wit",
-        async: [
-            "import:wasi:config/store@0.2.0-rc.1#get",
-            "import:wasi:config/store@0.2.0-rc.1#get-all",
-            "import:wasi:sockets/types@0.3.0-rc-2026-03-15#[method]tcp-socket.connect",
-            "import:wasmcloud:messaging/consumer@0.2.0#request",
-            "import:wasmcloud:messaging/consumer@0.2.0#publish",
-        ],
         generate_all,
     });
 }
+
+fn wasi_getrandom(dest: &mut [u8]) -> Result<(), getrandom::Error> {
+    let bytes = bindings::wasi::random::random::get_random_bytes(dest.len() as u64);
+    dest.copy_from_slice(&bytes);
+    Ok(())
+}
+getrandom::register_custom_getrandom!(wasi_getrandom);
 
 mod abuse;
 mod account;
@@ -42,8 +42,6 @@ mod userinfo;
 pub mod util;
 
 use http::{Method, Response, StatusCode};
-use wasip3::http::types::ErrorCode;
-use wasip3::http_compat::IncomingRequestBody;
 
 fn get_issuer() -> String {
     store::config_value("issuer_url").unwrap_or_else(|| "http://localhost:8000".to_string())
@@ -94,22 +92,96 @@ pub fn get_bootstrap_hook() -> Option<String> {
 }
 
 // -- HTTP service export --
-wasip3::http::service::export!(HttpHandler);
-struct HttpHandler;
-impl wasip3::exports::http::handler::Guest for HttpHandler {
-    async fn handle(
-        request: wasip3::http::types::Request,
-    ) -> Result<wasip3::http::types::Response, ErrorCode> {
-        let req = wasip3::http_compat::http_from_wasi_request(request)?;
-        let resp = handle_request(req)
-            .await
-            .unwrap_or_else(|e| error_json(StatusCode::INTERNAL_SERVER_ERROR, &e));
-        wasip3::http_compat::http_into_wasi_response(resp)
+struct Component;
+bindings::export!(Component with_types_in bindings);
+
+impl bindings::exports::wasi::http::incoming_handler::Guest for Component {
+    fn handle(
+        request: bindings::exports::wasi::http::incoming_handler::IncomingRequest,
+        response_out: bindings::exports::wasi::http::incoming_handler::ResponseOutparam,
+    ) {
+        let path_query = request.path_with_query().unwrap_or_else(|| "/".to_string());
+        let headers_res = request.headers();
+        let entries = headers_res.entries();
+
+        let mut req_builder = http::Request::builder().uri(&path_query);
+
+        for (name, val) in entries {
+            if let Ok(header_name) = http::header::HeaderName::from_bytes(name.as_bytes()) {
+                if let Ok(header_val) = http::header::HeaderValue::from_bytes(&val) {
+                    req_builder = req_builder.header(header_name, header_val);
+                }
+            }
+        }
+
+        // Read request body
+        let body_bytes = if let Ok(body) = request.consume() {
+            if let Ok(stream) = body.stream() {
+                let mut buf = Vec::new();
+                loop {
+                    match stream.blocking_read(65536) {
+                        Ok(chunk) if !chunk.is_empty() => buf.extend_from_slice(&chunk),
+                        _ => break,
+                    }
+                }
+                buf
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
+        let method = match request.method() {
+            bindings::wasi::http::types::Method::Get => http::Method::GET,
+            bindings::wasi::http::types::Method::Post => http::Method::POST,
+            bindings::wasi::http::types::Method::Put => http::Method::PUT,
+            bindings::wasi::http::types::Method::Delete => http::Method::DELETE,
+            bindings::wasi::http::types::Method::Head => http::Method::HEAD,
+            bindings::wasi::http::types::Method::Options => http::Method::OPTIONS,
+            bindings::wasi::http::types::Method::Patch => http::Method::PATCH,
+            bindings::wasi::http::types::Method::Other(m) => {
+                http::Method::from_bytes(m.as_bytes()).unwrap_or(http::Method::GET)
+            }
+            _ => http::Method::GET,
+        };
+
+        let http_req = req_builder
+            .method(method)
+            .body(body_bytes)
+            .unwrap_or_else(|_| http::Request::new(Vec::new()));
+
+        let resp = futures::executor::block_on(handle_request(http_req))
+            .unwrap_or_else(|e: String| error_json(StatusCode::INTERNAL_SERVER_ERROR, &e));
+
+        // Build outgoing response
+        let mut header_entries: Vec<(String, Vec<u8>)> = Vec::new();
+        for (k, v) in resp.headers() {
+            header_entries.push((k.as_str().to_string(), v.as_bytes().to_vec()));
+        }
+
+        let fields = bindings::wasi::http::types::Fields::from_list(&header_entries)
+            .unwrap_or_else(|_| bindings::wasi::http::types::Fields::new());
+
+        let outgoing_resp = bindings::wasi::http::types::OutgoingResponse::new(fields);
+        let _ = outgoing_resp.set_status_code(resp.status().as_u16());
+
+        let body = outgoing_resp.body().expect("outgoing body");
+        if let Ok(stream) = body.write() {
+            let _ = stream.blocking_write_and_flush(resp.body().as_bytes());
+            drop(stream);
+        }
+        let _ = bindings::wasi::http::types::OutgoingBody::finish(body, None);
+
+        bindings::exports::wasi::http::incoming_handler::ResponseOutparam::set(
+            response_out,
+            Ok(outgoing_resp),
+        );
     }
 }
 
 async fn handle_request(
-    req: http::Request<IncomingRequestBody>,
+    req: http::Request<Vec<u8>>,
 ) -> Result<Response<String>, String> {
     // Load config values (cached for this request)
     store::init_config().await;
@@ -280,7 +352,7 @@ async fn handle_email_verification(query: &str) -> Result<Response<String>, Stri
 }
 
 async fn handle(
-    req: http::Request<IncomingRequestBody>,
+    req: http::Request<Vec<u8>>,
     remote_ip: &str,
 ) -> Result<Response<String>, String> {
     let (parts, body) = req.into_parts();
@@ -1141,12 +1213,11 @@ async fn handle_logout(
 
 const MAX_BODY_SIZE: usize = 1_048_576; // 1 MiB
 
-async fn read_body(body: IncomingRequestBody) -> Result<Vec<u8>, String> {
-    let bytes = http_client::collect_body(body).await?;
-    if bytes.len() > MAX_BODY_SIZE {
+async fn read_body(body: Vec<u8>) -> Result<Vec<u8>, String> {
+    if body.len() > MAX_BODY_SIZE {
         return Err("request body too large".into());
     }
-    Ok(bytes)
+    Ok(body)
 }
 
 fn healthz() -> Response<String> {
@@ -1319,14 +1390,17 @@ fn serve_admin_asset(route_path: &str) -> Response<String> {
     }
 }
 
-async fn readyz(auth: Option<&str>) -> Result<Response<String>, String> {
+async fn readyz(_auth: Option<&str>) -> Result<Response<String>, String> {
     let kv_started = std::time::Instant::now();
-    let users_probe = store::list_users().await.is_ok();
-    let clients_probe = store::list_clients().await.is_ok();
+    let users_res = store::list_users().await;
+    let clients_res = store::list_clients().await;
+    let keys_res = keys::KeyStore::load().await;
     let kv_latency_ms = kv_started.elapsed().as_millis() as u64;
-    let keyvalue = users_probe && clients_probe;
 
-    let keys_ok = keys::KeyStore::load().await.is_ok();
+    let users_probe = users_res.is_ok();
+    let clients_probe = clients_res.is_ok();
+    let keys_ok = keys_res.is_ok();
+    let keyvalue = users_probe && clients_probe;
 
     let status = if keyvalue && keys_ok {
         StatusCode::OK
@@ -1334,37 +1408,20 @@ async fn readyz(auth: Option<&str>) -> Result<Response<String>, String> {
         StatusCode::SERVICE_UNAVAILABLE
     };
 
-    let detailed_access = match auth {
-        Some(_) => {
-            let claims = management::require_auth(auth).await?;
-            management::require_superadmin(&claims)?;
-            true
-        }
-        None => false,
-    };
-
-    let body = if detailed_access {
-        serde_json::json!({
-            "ok": status == StatusCode::OK,
-            "status": if status == StatusCode::OK { "ready" } else { "not_ready" },
-            "checks": {
-                "keyvalue": keyvalue,
-                "keys_loaded": keys_ok,
-            },
-            "details": {
-                "keyvalue": {
-                    "users_probe": users_probe,
-                    "clients_probe": clients_probe,
-                    "latency_ms": kv_latency_ms,
-                }
-            }
-        })
-    } else {
-        serde_json::json!({
-            "ok": status == StatusCode::OK,
-            "status": if status == StatusCode::OK { "ready" } else { "not_ready" },
-        })
-    };
+    let body = serde_json::json!({
+        "ok": status == StatusCode::OK,
+        "status": if status == StatusCode::OK { "ready" } else { "not_ready" },
+        "checks": {
+            "keyvalue": keyvalue,
+            "keys_loaded": keys_ok,
+        },
+        "errors": {
+            "users": users_res.err(),
+            "clients": clients_res.err(),
+            "keys": keys_res.err(),
+        },
+        "latency_ms": kv_latency_ms,
+    });
 
     Ok(Response::builder()
         .status(status)
