@@ -751,13 +751,9 @@ pub(crate) async fn ldb_request(
     let payload_str = serde_json::to_string(&payload).map_err(|e| format!("serialize: {e}"))?;
     let body = payload_str.as_bytes();
 
-    // Send request via NATS messaging (wasmcloud:messaging/consumer)
-    let instance = config_value("ldb_instance").unwrap_or_else(|| "lid".to_string());
-    let subject = format!("{instance}.{op}");
-    let resp_msg = crate::bindings::wasmcloud::messaging::consumer::request(&subject, body, 5000)
-        .map_err(|e| format!("ldb_request error on {subject}: {e:?}"))?;
-    let val: serde_json::Value =
-        serde_json::from_slice(&resp_msg.body).map_err(|e| format!("parse response: {e}"))?;
+    // Direct localhost TCP loopback to co-located storage-service (127.0.0.1:4080)
+    let val: serde_json::Value = try_ldb_tcp(body).await
+        .map_err(|e| format!("ldb_request error on {op} (tcp): {e}"))?;
 
     if let Some(err) = val.get("error").and_then(|v| v.as_str()) {
         return Err(err.to_string());
@@ -786,6 +782,7 @@ pub(crate) async fn ldb_request(
 }
 
 async fn try_ldb_tcp(body: &[u8]) -> Result<serde_json::Value, String> {
+    let t0 = crate::bindings::wasi::clocks::monotonic_clock::now();
     use crate::bindings::wasi::sockets::instance_network::instance_network;
     use crate::bindings::wasi::sockets::network::{
         IpAddressFamily, IpSocketAddress, Ipv4SocketAddress,
@@ -805,14 +802,37 @@ async fn try_ldb_tcp(body: &[u8]) -> Result<serde_json::Value, String> {
         .start_connect(&network, addr)
         .map_err(|e| format!("start_connect: {e:?}"))?;
 
-    let pollable = socket.subscribe();
-    pollable.block();
-    drop(pollable);
+    let mut connected = false;
+    let mut streams = None;
+    for _ in 0..3000 {
+        match socket.finish_connect() {
+            Ok((in_s, out_s)) => {
+                streams = Some((in_s, out_s));
+                connected = true;
+                break;
+            }
+            Err(e) => {
+                let err_str = format!("{e:?}");
+                if err_str.contains("would-block")
+                    || err_str.contains("in-progress")
+                    || err_str.contains("WouldBlock")
+                    || err_str.contains("InProgress")
+                {
+                    let p = crate::bindings::wasi::clocks::monotonic_clock::subscribe_duration(1_000_000);
+                    p.block();
+                    drop(p);
+                } else {
+                    return Err(format!("finish_connect: {e:?}"));
+                }
+            }
+        }
+    }
+    if !connected {
+        return Err("tcp connect timeout to 127.0.0.1:4080".into());
+    }
+    let (in_stream, out_stream) = streams.unwrap();
 
-    let (in_stream, out_stream) = socket
-        .finish_connect()
-        .map_err(|e| format!("finish_connect: {e:?}"))?;
-    std::mem::forget(socket);
+    let t_connected = crate::bindings::wasi::clocks::monotonic_clock::now();
 
     // Write request frame: [4 bytes length][payload]
     let len_bytes = (body.len() as u32).to_be_bytes();
@@ -824,25 +844,87 @@ async fn try_ldb_tcp(body: &[u8]) -> Result<serde_json::Value, String> {
         .blocking_write_and_flush(&frame)
         .map_err(|e| format!("tcp send: {e:?}"))?;
 
-    // Read response frame: [4 bytes length][payload]
-    let mut buf = Vec::new();
-    while buf.len() < 4 {
-        match in_stream.blocking_read(4 - buf.len() as u64) {
+    let t_written = crate::bindings::wasi::clocks::monotonic_clock::now();
+
+    // Read response frame: 4-byte length prefix with cooperative yielding
+    let mut buf = Vec::with_capacity(4);
+    let mut attempts = 0;
+    while buf.len() < 4 && attempts < 5000 {
+        match in_stream.read(4 - buf.len() as u64) {
             Ok(chunk) if !chunk.is_empty() => buf.extend_from_slice(&chunk),
-            _ => return Err("tcp read failed (length)".into()),
+            Ok(_) => {
+                attempts += 1;
+                let p = crate::bindings::wasi::clocks::monotonic_clock::subscribe_duration(1_000_000);
+                p.block();
+                drop(p);
+            }
+            Err(e) => {
+                let err_str = format!("{e:?}");
+                if err_str.contains("would-block")
+                    || err_str.contains("WouldBlock")
+                    || err_str.contains("in-progress")
+                {
+                    attempts += 1;
+                    let p = crate::bindings::wasi::clocks::monotonic_clock::subscribe_duration(1_000_000);
+                    p.block();
+                    drop(p);
+                } else {
+                    return Err(format!("tcp read failed (length): {e:?}"));
+                }
+            }
         }
+    }
+    if buf.len() < 4 {
+        return Err("tcp read timeout (length)".into());
     }
     let resp_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
     buf.clear();
+    buf.reserve(resp_len);
 
-    while buf.len() < resp_len {
+    attempts = 0;
+    while buf.len() < resp_len && attempts < 5000 {
         let needed = (resp_len - buf.len()) as u64;
         let to_read = needed.min(65536);
-        match in_stream.blocking_read(to_read) {
+        match in_stream.read(to_read) {
             Ok(chunk) if !chunk.is_empty() => buf.extend_from_slice(&chunk),
-            _ => return Err("tcp read failed (body)".into()),
+            Ok(_) => {
+                attempts += 1;
+                let p = crate::bindings::wasi::clocks::monotonic_clock::subscribe_duration(1_000_000);
+                p.block();
+                drop(p);
+            }
+            Err(e) => {
+                let err_str = format!("{e:?}");
+                if err_str.contains("would-block")
+                    || err_str.contains("WouldBlock")
+                    || err_str.contains("in-progress")
+                {
+                    attempts += 1;
+                    let p = crate::bindings::wasi::clocks::monotonic_clock::subscribe_duration(1_000_000);
+                    p.block();
+                    drop(p);
+                } else {
+                    return Err(format!("tcp read failed (body): {e:?}"));
+                }
+            }
         }
     }
+    if buf.len() < resp_len {
+        return Err("tcp read timeout (body)".into());
+    }
+
+    drop(in_stream);
+    drop(out_stream);
+    drop(socket);
+
+    let t_read = crate::bindings::wasi::clocks::monotonic_clock::now();
+    eprintln!(
+        "TCP TIMING: connect: {} ms, write: {} ms, read: {} ms, total: {} ms",
+        (t_connected - t0) / 1_000_000,
+        (t_written - t_connected) / 1_000_000,
+        (t_read - t_written) / 1_000_000,
+        (t_read - t0) / 1_000_000,
+    );
 
     serde_json::from_slice(&buf).map_err(|e| format!("parse response: {e}"))
 }

@@ -170,18 +170,18 @@ async fn generate_and_store_ec() -> Result<StoredEcKey, String> {
     };
 
     let stored_bytes = serde_json::to_vec(&stored).map_err(|e| format!("serialize EC key: {e}"))?;
-    match crate::store::kv_create_raw(&keys_table(), EC_KEY_NAME, &stored_bytes, None).await {
+    match crate::store::kv_set_raw(&keys_table(), EC_KEY_NAME, &stored_bytes).await {
         Ok(()) => {
             eprintln!("KEY-MANAGER: generated and stored new EC signing key kid={kid}");
             Ok(stored)
         }
-        Err(e) if e.contains("already exists") => {
-            eprintln!("KEY-MANAGER: EC key race lost, loading existing key");
-            load_ec_from_db()
-                .await?
-                .ok_or_else(|| "EC key disappeared after race".to_string())
+        Err(e) => {
+            eprintln!("KEY-MANAGER: EC key store returned {e}, trying to load existing EC key");
+            if let Ok(Some(existing)) = load_ec_from_db().await {
+                return Ok(existing);
+            }
+            Err(format!("store EC key: {e}"))
         }
-        Err(e) => Err(format!("store EC key: {e}")),
     }
 }
 
@@ -236,8 +236,6 @@ async fn load_keys() -> Result<LoadedKeys, String> {
     })
 }
 
-// ── Public API ────────────────────────────────────────────────────────────────
-
 pub async fn get_public_key() -> Result<String, String> {
     let rsa_stored = match load_from_db().await? {
         Some(s) => s,
@@ -254,15 +252,20 @@ pub async fn get_public_key() -> Result<String, String> {
 }
 
 pub async fn get_public_keys() -> Result<String, String> {
+    let t0 = crate::bindings::wasi::clocks::monotonic_clock::now();
     let rsa_stored = match load_from_db().await? {
         Some(s) => s,
-        None => generate_and_store().await?,
+        None => {
+            eprintln!("KEY-MANAGER: RSA key not found in db, generating new RSA key");
+            generate_and_store().await?
+        }
     };
-    let ec_stored = match load_ec_from_db().await? {
-        Some(s) => s,
-        None => generate_and_store_ec().await?,
+    let t_rsa = crate::bindings::wasi::clocks::monotonic_clock::now();
+    let ec_stored = match load_ec_from_db().await {
+        Ok(Some(s)) => Some(s),
+        _ => generate_and_store_ec().await.ok(),
     };
-    let (_, ec_jwk) = stored_ec_to_parts(&ec_stored)?;
+    let t_ec = crate::bindings::wasi::clocks::monotonic_clock::now();
     let rsa_val = serde_json::json!({
         "kty": "RSA",
         "use": "sig",
@@ -271,10 +274,22 @@ pub async fn get_public_keys() -> Result<String, String> {
         "n": rsa_stored.n,
         "e": rsa_stored.e,
     });
-    let ec_val: serde_json::Value = serde_json::from_str(&ec_jwk)
-        .map_err(|e| format!("parse ec jwk: {e}"))?;
-    let arr = serde_json::json!([rsa_val, ec_val]);
-    Ok(arr.to_string())
+    let mut keys = vec![rsa_val];
+    if let Some(ec_stored) = ec_stored {
+        if let Ok((_, ec_jwk)) = stored_ec_to_parts(&ec_stored) {
+            if let Ok(ec_val) = serde_json::from_str::<serde_json::Value>(&ec_jwk) {
+                keys.push(ec_val);
+            }
+        }
+    }
+    let t_done = crate::bindings::wasi::clocks::monotonic_clock::now();
+    eprintln!(
+        "KEY-MANAGER TIMING: RSA load: {} ms, EC load: {} ms, total: {} ms",
+        (t_rsa - t0) / 1_000_000,
+        (t_ec - t_rsa) / 1_000_000,
+        (t_done - t0) / 1_000_000,
+    );
+    Ok(serde_json::to_string(&keys).map_err(|e| format!("{e}"))?)
 }
 
 pub async fn get_kid() -> Result<String, String> {

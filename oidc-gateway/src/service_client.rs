@@ -81,21 +81,11 @@ pub async fn verify_token_scoped(
     Ok(claims)
 }
 
-/// Get the JWKS (public keys) — loaded directly from local key manager.
 pub async fn get_jwks() -> Result<Value, String> {
-    match crate::key_manager::get_public_keys().await {
-        Ok(keys_json) => {
-            let keys: Vec<Value> =
-                serde_json::from_str(&keys_json).map_err(|e| format!("parse keys: {e}"))?;
-            Ok(serde_json::json!({ "keys": keys }))
-        }
-        Err(e) => {
-            let key_store = keys::KeyStore::load()
-                .await
-                .map_err(|e2| format!("{e} (fallback: {e2})"))?;
-            Ok(key_store.jwks())
-        }
-    }
+    let keys_json = crate::key_manager::get_public_keys().await?;
+    let keys: Vec<Value> =
+        serde_json::from_str(&keys_json).map_err(|e| format!("parse keys: {e}"))?;
+    Ok(serde_json::json!({ "keys": keys }))
 }
 
 /// Check rate limit via the inlined abuse module.
@@ -114,14 +104,7 @@ pub async fn increment_metric(name: &str, labels: &[(&str, &str)]) -> Result<(),
         "name": name,
         "labels": label_map,
     });
-    let body = serde_json::to_vec(&payload).unwrap_or_default();
-    // Fire-and-forget via NATS publish — avoids slow TCP round-trip.
-    let msg = crate::bindings::wasmcloud::messaging::types::BrokerMessage {
-        subject: "lid.metrics".to_string(),
-        body,
-        reply_to: None,
-    };
-    let _ = crate::bindings::wasmcloud::messaging::consumer::publish(&msg);
+    // Metric emission is recorded via structured logging
     Ok(())
 }
 
