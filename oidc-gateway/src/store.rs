@@ -790,25 +790,73 @@ async fn try_ldb_tcp(body: &[u8]) -> Result<serde_json::Value, String> {
     use crate::bindings::wasi::sockets::tcp_create_socket::create_tcp_socket;
 
     let network = instance_network();
-    let socket =
-        create_tcp_socket(IpAddressFamily::Ipv4).map_err(|e| format!("tcp create: {e:?}"))?;
-
     let addr = IpSocketAddress::Ipv4(Ipv4SocketAddress {
         port: LDB_TCP_PORT,
         address: (127, 0, 0, 1),
     });
 
-    socket
-        .start_connect(&network, addr)
-        .map_err(|e| format!("start_connect: {e:?}"))?;
+    let mut last_err = String::new();
+    let mut streams = None;
 
-    let pollable = socket.subscribe();
-    pollable.block();
-    drop(pollable);
+    for _ in 0..10 {
+        let socket = match create_tcp_socket(IpAddressFamily::Ipv4) {
+            Ok(s) => s,
+            Err(e) => {
+                last_err = format!("tcp create: {e:?}");
+                let p = crate::bindings::wasi::clocks::monotonic_clock::subscribe_duration(1_000_000);
+                p.block();
+                drop(p);
+                continue;
+            }
+        };
 
-    let (in_stream, out_stream) = socket
-        .finish_connect()
-        .map_err(|e| format!("finish_connect: {e:?}"))?;
+        match socket.start_connect(&network, addr) {
+            Ok(()) => {}
+            Err(e) => {
+                last_err = format!("start_connect: {e:?}");
+                drop(socket);
+                let p = crate::bindings::wasi::clocks::monotonic_clock::subscribe_duration(1_000_000);
+                p.block();
+                drop(p);
+                continue;
+            }
+        }
+
+        let mut connected = false;
+        for _ in 0..10 {
+            let pollable = socket.subscribe();
+            pollable.block();
+            drop(pollable);
+
+            match socket.finish_connect() {
+                Ok((in_s, out_s)) => {
+                    streams = Some((in_s, out_s, socket));
+                    connected = true;
+                    break;
+                }
+                Err(e) => {
+                    let err_str = format!("{e:?}");
+                    if err_str.contains("WouldBlock")
+                        || err_str.contains("InProgress")
+                        || err_str.contains("would-block")
+                        || err_str.contains("in-progress")
+                    {
+                        continue;
+                    }
+                    last_err = format!("finish_connect: {e:?}");
+                    break;
+                }
+            }
+        }
+
+        if connected {
+            break;
+        }
+    }
+
+    let (in_stream, out_stream, socket) = streams.ok_or_else(|| {
+        format!("tcp connect failed after retries: {last_err}")
+    })?;
 
     let t_connected = crate::bindings::wasi::clocks::monotonic_clock::now();
 
