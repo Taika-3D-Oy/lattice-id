@@ -632,14 +632,9 @@ async fn handle(
 }
 
 /// Verify the shared secret on `/internal/*` requests.
-/// In development mode a missing secret is tolerated so `wash dev` keeps
-/// working without extra configuration. Outside dev mode, `/internal/*`
-/// requests require `internal_auth_secret` to be configured and matched.
+/// All `/internal/*` requests strictly require `internal_auth_secret` to be configured and matched.
 fn verify_internal_auth(headers: &http::HeaderMap) -> Result<(), String> {
     let Some(expected) = store::internal_auth_secret().filter(|s| !s.trim().is_empty()) else {
-        if is_dev_mode() {
-            return Ok(());
-        }
         return Err("internal_auth_secret is not configured".into());
     };
     let provided = headers

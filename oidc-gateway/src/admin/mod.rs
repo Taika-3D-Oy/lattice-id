@@ -77,6 +77,13 @@ pub async fn handle_admin_route(
         Err(resp) => return resp,
     };
 
+    // ── CSRF Protection on state-mutating requests ──
+    if *method == Method::POST || *method == Method::PUT || *method == Method::DELETE {
+        if let Err(resp) = verify_admin_csrf(headers, body, &session) {
+            return resp;
+        }
+    }
+
     // ── Route Dispatch ──
     let path_no_query = path.split('?').next().unwrap_or(path);
     let clean_path = path_no_query.trim_end_matches('/');
@@ -731,10 +738,55 @@ async fn handle_parameterized_route(
     error_response(StatusCode::NOT_FOUND, "Admin route not found")
 }
 
-// ── Session Resolver ───────────────────────────────────────────
+// ── Session Resolver & CSRF Protection ──────────────────────────
+
+fn verify_admin_csrf(
+    headers: &HeaderMap,
+    body: &[u8],
+    session: &AdminSession,
+) -> Result<(), Response<String>> {
+    use subtle::ConstantTimeEq;
+
+    // 1. Bearer token authenticated requests (API clients) are not vulnerable to browser CSRF
+    if let Some(auth_hdr) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
+        if auth_hdr.starts_with("Bearer ") || auth_hdr.starts_with("bearer ") {
+            return Ok(());
+        }
+    }
+
+    // 2. Check x-csrf-token or hx-csrf-token header (HTMX)
+    let header_csrf = headers
+        .get("x-csrf-token")
+        .or_else(|| headers.get("hx-csrf-token"))
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if !header_csrf.is_empty()
+        && header_csrf.len() == session.csrf_token.len()
+        && bool::from(header_csrf.as_bytes().ct_eq(session.csrf_token.as_bytes()))
+    {
+        return Ok(());
+    }
+
+    // 3. Check form body
+    let form = parse_form(body);
+    let form_csrf = form_value(&form, "csrf_token").unwrap_or("");
+    if !form_csrf.is_empty()
+        && form_csrf.len() == session.csrf_token.len()
+        && bool::from(form_csrf.as_bytes().ct_eq(session.csrf_token.as_bytes()))
+    {
+        return Ok(());
+    }
+
+    Err(error_response(
+        StatusCode::FORBIDDEN,
+        "CSRF check failed: invalid or missing CSRF token",
+    ))
+}
 
 async fn resolve_admin_session(headers: &HeaderMap) -> Result<AdminSession, Response<String>> {
     let mut user_opt: Option<User> = None;
+    let mut csrf_token_opt: Option<String> = None;
 
     // Check Authorization: Bearer <jwt>
     if let Some(auth_hdr) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
@@ -743,6 +795,7 @@ async fn resolve_admin_session(headers: &HeaderMap) -> Result<AdminSession, Resp
                 if let Some(sub) = claims.get("sub").and_then(|v| v.as_str()) {
                     if let Ok(Some(u)) = store::get_user(sub).await {
                         user_opt = Some(u);
+                        csrf_token_opt = Some(store::random_hex(24));
                     }
                 }
             }
@@ -759,6 +812,11 @@ async fn resolve_admin_session(headers: &HeaderMap) -> Result<AdminSession, Resp
                         if store::unix_now() <= session_rec.expires_at {
                             if let Ok(Some(u)) = store::get_user(&session_rec.user_id).await {
                                 user_opt = Some(u);
+                                csrf_token_opt = Some(if !session_rec.csrf_token.is_empty() {
+                                    session_rec.csrf_token
+                                } else {
+                                    store::sha256_hex(&format!("csrf:{val}"))[..24].to_string()
+                                });
                                 break;
                             }
                         }
@@ -768,6 +826,7 @@ async fn resolve_admin_session(headers: &HeaderMap) -> Result<AdminSession, Resp
                         if store::unix_now() <= session_rec.expires_at {
                             if let Ok(Some(u)) = store::get_user(&session_rec.user_id).await {
                                 user_opt = Some(u);
+                                csrf_token_opt = Some(store::sha256_hex(&format!("csrf:{val}"))[..24].to_string());
                                 break;
                             }
                         }
@@ -829,12 +888,14 @@ async fn resolve_admin_session(headers: &HeaderMap) -> Result<AdminSession, Resp
         current_tenant = tenants.first().cloned();
     }
 
+    let csrf_token = csrf_token_opt.unwrap_or_else(|| store::random_hex(24));
+
     Ok(AdminSession {
         user,
         is_superadmin: is_super,
         current_tenant,
         tenants,
-        csrf_token: store::random_alphanumeric(16),
+        csrf_token,
     })
 }
 
@@ -1021,11 +1082,19 @@ async fn handle_admin_login(body: &[u8]) -> Response<String> {
     };
 
     if user.status != "active" {
+        let _ = crate::service_client::verify_password(
+            password,
+            "$argon2id$v=19$m=65536,t=3,p=1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        ).await;
         return views::login::render_login_page(Some("This account is not active. Please contact an administrator."), return_target);
     }
 
     // Check account lockout
     if store::is_account_locked(&user.id).await.unwrap_or(false) {
+        let _ = crate::service_client::verify_password(
+            password,
+            "$argon2id$v=19$m=65536,t=3,p=1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        ).await;
         return views::login::render_login_page(Some("Account temporarily locked due to repeated failed login attempts. Please try again later."), return_target);
     }
 
@@ -1204,4 +1273,133 @@ fn error_response(status: StatusCode, message: &str) -> Response<String> {
             message
         ))
         .unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::HeaderMap;
+
+    #[test]
+    fn test_verify_admin_csrf_with_bearer_token() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer test-jwt-token".parse().unwrap());
+        let session = AdminSession {
+            user: User {
+                id: "user1".to_string(),
+                email: "test@example.com".to_string(),
+                name: "Test".to_string(),
+                password_hash: "hash".to_string(),
+                status: "active".to_string(),
+                created_at: 0,
+                superadmin: true,
+                totp_secret: None,
+                totp_enabled: false,
+                recovery_codes: vec![],
+                passkey_credentials: vec![],
+            },
+            is_superadmin: true,
+            current_tenant: None,
+            tenants: vec![],
+            csrf_token: "csrf-token-12345".to_string(),
+        };
+
+        // Bearer token requests should bypass CSRF validation
+        assert!(verify_admin_csrf(&headers, b"name=value", &session).is_ok());
+    }
+
+    #[test]
+    fn test_verify_admin_csrf_with_valid_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-csrf-token", "valid-csrf-token-secret".parse().unwrap());
+        let session = AdminSession {
+            user: User {
+                id: "user1".to_string(),
+                email: "test@example.com".to_string(),
+                name: "Test".to_string(),
+                password_hash: "hash".to_string(),
+                status: "active".to_string(),
+                created_at: 0,
+                superadmin: true,
+                totp_secret: None,
+                totp_enabled: false,
+                recovery_codes: vec![],
+                passkey_credentials: vec![],
+            },
+            is_superadmin: true,
+            current_tenant: None,
+            tenants: vec![],
+            csrf_token: "valid-csrf-token-secret".to_string(),
+        };
+
+        assert!(verify_admin_csrf(&headers, b"", &session).is_ok());
+    }
+
+    #[test]
+    fn test_verify_admin_csrf_with_valid_form_body() {
+        let headers = HeaderMap::new();
+        let session = AdminSession {
+            user: User {
+                id: "user1".to_string(),
+                email: "test@example.com".to_string(),
+                name: "Test".to_string(),
+                password_hash: "hash".to_string(),
+                status: "active".to_string(),
+                created_at: 0,
+                superadmin: true,
+                totp_secret: None,
+                totp_enabled: false,
+                recovery_codes: vec![],
+                passkey_credentials: vec![],
+            },
+            is_superadmin: true,
+            current_tenant: None,
+            tenants: vec![],
+            csrf_token: "valid-csrf-token-secret".to_string(),
+        };
+
+        let body = b"name=acme&csrf_token=valid-csrf-token-secret";
+        assert!(verify_admin_csrf(&headers, body, &session).is_ok());
+    }
+
+    #[test]
+    fn test_verify_admin_csrf_rejects_invalid_or_missing() {
+        let headers = HeaderMap::new();
+        let session = AdminSession {
+            user: User {
+                id: "user1".to_string(),
+                email: "test@example.com".to_string(),
+                name: "Test".to_string(),
+                password_hash: "hash".to_string(),
+                status: "active".to_string(),
+                created_at: 0,
+                superadmin: true,
+                totp_secret: None,
+                totp_enabled: false,
+                recovery_codes: vec![],
+                passkey_credentials: vec![],
+            },
+            is_superadmin: true,
+            current_tenant: None,
+            tenants: vec![],
+            csrf_token: "valid-csrf-token-secret".to_string(),
+        };
+
+        // Missing CSRF token
+        let res = verify_admin_csrf(&headers, b"name=acme", &session);
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err().status(), StatusCode::FORBIDDEN);
+
+        // Wrong CSRF token in header
+        let mut headers_wrong = HeaderMap::new();
+        headers_wrong.insert("x-csrf-token", "wrong-csrf-token-secret".parse().unwrap());
+        let res2 = verify_admin_csrf(&headers_wrong, b"", &session);
+        assert!(res2.is_err());
+        assert_eq!(res2.unwrap_err().status(), StatusCode::FORBIDDEN);
+
+        // Wrong CSRF token in body
+        let res3 = verify_admin_csrf(&headers, b"name=acme&csrf_token=wrong-csrf-token", &session);
+        assert!(res3.is_err());
+        assert_eq!(res3.unwrap_err().status(), StatusCode::FORBIDDEN);
+    }
 }

@@ -444,6 +444,11 @@ pub async fn handle_login(body_bytes: &[u8], remote_ip: &str) -> Result<Response
 
     // Check account lockout
     if crate::store::is_account_locked(&user.id).await? {
+        // Perform a dummy password hash to prevent timing-based lockout enumeration.
+        let _ = crate::service_client::verify_password(
+            password,
+            "$argon2id$v=19$m=65536,t=3,p=1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        ).await;
         let _ = crate::store::log_audit("login_locked", &user.id, &user.id, "account locked").await;
         let _ = crate::service_client::increment_metric(
             "lattice_id_login_attempts_total",

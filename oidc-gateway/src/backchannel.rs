@@ -45,6 +45,10 @@ async fn try_notify_client(user_id: &str, client_id: &str, issuer: &str) -> Resu
         _ => return Ok(()), // No backchannel logout configured for this client
     };
 
+    // Validate URL against SSRF
+    crate::util::is_safe_external_url(&uri)
+        .map_err(|e| format!("insecure backchannel_logout_uri '{uri}': {e}"))?;
+
     let logout_token = build_logout_token(user_id, client_id, issuer).await?;
     let body = format!(
         "logout_token={}",

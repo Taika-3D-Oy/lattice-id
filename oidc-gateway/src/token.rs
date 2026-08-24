@@ -807,14 +807,15 @@ async fn authenticate_confidential_client(
     let client = store::get_client(client_id)
         .await?
         .ok_or("invalid client authentication")?;
-    let expected_secret = client
+    let expected_hash = client
         .client_secret
         .as_deref()
         .ok_or("invalid client authentication")?;
 
-    let matches: bool = expected_secret
+    let provided_hash = store::hmac_client_secret(client_secret);
+    let matches: bool = expected_hash
         .as_bytes()
-        .ct_eq(client_secret.as_bytes())
+        .ct_eq(provided_hash.as_bytes())
         .into();
     if !matches {
         return Err("invalid client authentication".into());

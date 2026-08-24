@@ -35,7 +35,7 @@ pub fn render_layout(
                 link rel="stylesheet" href="/admin/style.css";
                 script src="/admin/htmx.min.js" {}
             }
-            body class="app-shell" {
+            body class="app-shell" hx-headers=(format!(r#"{{"x-csrf-token": "{}"}}"#, session.csrf_token)) {
                 // ── Topbar ──
                 header class="topbar" {
                     a href="/admin" class="topbar-brand" { "⬡ Taika ID" }

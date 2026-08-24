@@ -47,17 +47,21 @@ pub async fn start(
         return Err(format!("identity provider '{provider_id}' is disabled"));
     }
 
-    let discovery = fetch_discovery(
-        idp.discovery_url
-            .as_deref()
-            .ok_or("identity provider missing discovery_url")?,
-    )
-    .await?;
+    let discovery_url = idp
+        .discovery_url
+        .as_deref()
+        .ok_or("identity provider missing discovery_url")?;
+    util::is_safe_external_url(discovery_url)
+        .map_err(|e| format!("insecure discovery_url: {e}"))?;
+
+    let discovery = fetch_discovery(discovery_url).await?;
 
     let auth_endpoint = discovery
         .get("authorization_endpoint")
         .and_then(|v| v.as_str())
         .ok_or("missing authorization_endpoint in provider discovery")?;
+    util::is_safe_external_url(auth_endpoint)
+        .map_err(|e| format!("insecure authorization_endpoint: {e}"))?;
 
     let csrf_token = store::random_hex(16);
     store::save_social_csrf(&csrf_token, session_id).await?;
@@ -133,17 +137,23 @@ pub async fn callback(
         .discovery_url
         .as_deref()
         .ok_or("identity provider missing discovery_url")?;
+    util::is_safe_external_url(discovery_url)
+        .map_err(|e| format!("insecure discovery_url: {e}"))?;
     let discovery = fetch_discovery(discovery_url).await?;
 
     let token_endpoint = discovery
         .get("token_endpoint")
         .and_then(|v| v.as_str())
         .ok_or("missing token_endpoint in provider discovery")?;
+    util::is_safe_external_url(token_endpoint)
+        .map_err(|e| format!("insecure token_endpoint: {e}"))?;
 
     let jwks_uri = discovery
         .get("jwks_uri")
         .and_then(|v| v.as_str())
         .ok_or("missing jwks_uri in provider discovery")?;
+    util::is_safe_external_url(jwks_uri)
+        .map_err(|e| format!("insecure jwks_uri: {e}"))?;
 
     let expected_issuer = discovery
         .get("issuer")

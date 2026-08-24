@@ -97,3 +97,191 @@ pub fn sanitize_color(color: Option<&str>, fallback: &str) -> String {
 pub fn is_safe_url(url: &str) -> bool {
     url.starts_with("http://") || url.starts_with("https://")
 }
+
+/// Validate that a URL is a safe external destination (prevents SSRF to internal networks/cloud metadata).
+pub fn is_safe_external_url(url: &str) -> Result<(), String> {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err("invalid scheme (must be http or https)".into());
+    }
+
+    let without_scheme = if let Some(rest) = url.strip_prefix("https://") {
+        rest
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        rest
+    } else {
+        return Err("invalid scheme".into());
+    };
+
+    // Extract authority (host[:port]) before '/', '?', or '#'
+    let authority = without_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim();
+
+    if authority.is_empty() {
+        return Err("missing host in URL".into());
+    }
+
+    // Strip userinfo (user:pass@) if present
+    let host_port = if let Some((_, hp)) = authority.split_once('@') {
+        hp
+    } else {
+        authority
+    };
+
+    // Extract host without port or ipv6 brackets
+    let host = if host_port.starts_with('[') {
+        let end = host_port.find(']').ok_or("unclosed IPv6 bracket in URL")?;
+        &host_port[1..end]
+    } else if let Some((h, _)) = host_port.split_once(':') {
+        h
+    } else {
+        host_port
+    };
+
+    let host_lower = host.to_lowercase();
+
+    // Check prohibited hostnames
+    if host_lower == "localhost"
+        || host_lower.ends_with(".localhost")
+        || host_lower.ends_with(".local")
+        || host_lower.ends_with(".internal")
+        || host_lower == "metadata.google.internal"
+        || host_lower == "metadata"
+        || host_lower == "instance-data"
+    {
+        return Err(format!("forbidden target host: {host}"));
+    }
+
+    // If host is an IP address, check against private/reserved ranges
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if is_private_or_reserved_ip(&ip) {
+            return Err(format!("forbidden target IP: {ip}"));
+        }
+    }
+
+    Ok(())
+}
+
+fn is_private_or_reserved_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ipv4) => {
+            let octets = ipv4.octets();
+            // 0.0.0.0/8 (Current network)
+            if octets[0] == 0 {
+                return true;
+            }
+            // 10.0.0.0/8 (Private Class A)
+            if octets[0] == 10 {
+                return true;
+            }
+            // 127.0.0.0/8 (Loopback)
+            if octets[0] == 127 {
+                return true;
+            }
+            // 169.254.0.0/16 (Link-local / Cloud Metadata)
+            if octets[0] == 169 && octets[1] == 254 {
+                return true;
+            }
+            // 172.16.0.0/12 (Private Class B)
+            if octets[0] == 172 && (16..=31).contains(&octets[1]) {
+                return true;
+            }
+            // 192.168.0.0/16 (Private Class C)
+            if octets[0] == 192 && octets[1] == 168 {
+                return true;
+            }
+            // 100.64.0.0/10 (Carrier-grade NAT)
+            if octets[0] == 100 && (64..=127).contains(&octets[1]) {
+                return true;
+            }
+            // 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24 (TEST-NET)
+            if (octets[0] == 192 && octets[1] == 0 && octets[2] == 2)
+                || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
+                || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
+            {
+                return true;
+            }
+            // 224.0.0.0/4 (Multicast), 240.0.0.0/4 (Reserved), 255.255.255.255 (Broadcast)
+            if octets[0] >= 224 {
+                return true;
+            }
+            false
+        }
+        std::net::IpAddr::V6(ipv6) => {
+            if ipv6.is_loopback() || ipv6.is_unspecified() {
+                return true;
+            }
+            let segments = ipv6.segments();
+            // fe80::/10 (Link-local)
+            if (segments[0] & 0xffc0) == 0xfe80 {
+                return true;
+            }
+            // fc00::/7 (Unique local)
+            if (segments[0] & 0xfe00) == 0xfc00 {
+                return true;
+            }
+            // ff00::/8 (Multicast)
+            if (segments[0] & 0xff00) == 0xff00 {
+                return true;
+            }
+            // IPv4-mapped IPv6: ::ffff:x.x.x.x
+            if segments[0] == 0
+                && segments[1] == 0
+                && segments[2] == 0
+                && segments[3] == 0
+                && segments[4] == 0
+                && segments[5] == 0xffff
+            {
+                let ipv4 = std::net::Ipv4Addr::new(
+                    (segments[6] >> 8) as u8,
+                    segments[6] as u8,
+                    (segments[7] >> 8) as u8,
+                    segments[7] as u8,
+                );
+                return is_private_or_reserved_ip(&std::net::IpAddr::V4(ipv4));
+            }
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_safe_external_url() {
+        assert!(is_safe_external_url("https://example.com/oauth/callback").is_ok());
+        assert!(is_safe_external_url("https://auth.company.com:8443/logout").is_ok());
+
+        // Prohibited schemes
+        assert!(is_safe_external_url("file:///etc/passwd").is_err());
+        assert!(is_safe_external_url("ftp://ftp.example.com").is_err());
+        assert!(is_safe_external_url("javascript:alert(1)").is_err());
+
+        // Prohibited hostnames
+        assert!(is_safe_external_url("http://localhost/api").is_err());
+        assert!(is_safe_external_url("http://sub.localhost/api").is_err());
+        assert!(is_safe_external_url("http://internal.taika3d.local/api").is_err());
+        assert!(is_safe_external_url("http://service.default.internal:8080").is_err());
+        assert!(is_safe_external_url("http://metadata.google.internal/computeMetadata/v1/").is_err());
+
+        // Private/loopback IPv4
+        assert!(is_safe_external_url("http://127.0.0.1:8080/hook").is_err());
+        assert!(is_safe_external_url("http://127.0.0.2/hook").is_err());
+        assert!(is_safe_external_url("http://10.0.0.5/logout").is_err());
+        assert!(is_safe_external_url("http://172.16.10.20/logout").is_err());
+        assert!(is_safe_external_url("http://192.168.1.1/admin").is_err());
+        assert!(is_safe_external_url("http://169.254.169.254/latest/meta-data/").is_err());
+        assert!(is_safe_external_url("http://0.0.0.0:80/").is_err());
+
+        // Private/loopback IPv6
+        assert!(is_safe_external_url("http://[::1]/logout").is_err());
+        assert!(is_safe_external_url("http://[fe80::1]/logout").is_err());
+        assert!(is_safe_external_url("http://[fc00::1]/logout").is_err());
+        assert!(is_safe_external_url("http://[::ffff:127.0.0.1]/logout").is_err());
+        assert!(is_safe_external_url("http://[::ffff:169.254.169.254]/logout").is_err());
+    }
+}

@@ -125,6 +125,7 @@ pub async fn render_hook_editor_page(
             // ── Editor Form ──
             div class="card" {
                 form method="POST" action={@if is_new { "/admin/hooks" } @else { (format!("/admin/hooks/{}", id)) }} {
+                    input type="hidden" name="csrf_token" value=(session.csrf_token);
                     div class="form-row" {
                         label for="name" { "Hook Name" }
                         input type="text" id="name" name="name" required value=(name) placeholder="Enrich Company Claims";
