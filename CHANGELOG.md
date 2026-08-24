@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] - 2026-08-24
+
+### Added
+
+- **Full Identity Provider Lifecycle & In-Place Management**:
+  - Added HTMX-powered instant enable/disable toggle switch (`POST /admin/identity-providers/:id/toggle`) for real-time activation without page reloads.
+  - Added IdP Edit modal (`GET /admin/identity-providers/:id/modal/edit` and `POST /admin/identity-providers/:id/update`) allowing updates to Client ID, Client Secret, and enabled state.
+  - Added branded SVG icons and status badges for Google, GitHub, Microsoft, and generic OpenID Connect providers in the Admin console.
+  - Dynamic login button rendering on `/login` that automatically shows or hides provider buttons (e.g., "Continue with Google", "Continue with GitHub") based on active provider configuration.
+- **Unified Sign-In Architecture**:
+  - Unified Admin UI authentication with the standard OIDC authorization flow via the `lid-admin` first-party client.
+  - Unauthenticated access to `/admin` seamlessly redirects through `/authorize` to the unified sign-in screen, enabling Google SSO, Passkeys, Email/Password, and MFA across all portals.
+  - Automatic admin privilege verification (`superadmin` or tenant `admin`/`owner`) on session establishment.
+- **Enhanced Design System & Interaction States**:
+  - Added toggle switch components, social button states, and HTMX request indicators to `admin.css`.
+
 ## [1.8.0] - 2026-08-24
 
 ### Added

@@ -53,10 +53,14 @@ pub async fn handle_admin_route(
                 .body(String::new())
                 .unwrap();
         }
-        let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-        let params = parse_query(query);
-        let return_to = params.iter().find(|(k, _)| k == "return_to").map(|(_, v)| v.as_str()).unwrap_or("/admin");
-        return views::login::render_login_page(None, return_to);
+        return Response::builder()
+            .status(StatusCode::SEE_OTHER)
+            .header(
+                "location",
+                "/authorize?client_id=lid-admin&redirect_uri=/admin&response_type=code&scope=openid+email+profile&state=admin_login",
+            )
+            .body(String::new())
+            .unwrap();
     }
 
     if p == "/admin/login/mfa" && method == Method::POST {
@@ -595,10 +599,52 @@ async fn handle_parameterized_route(
     }
 
     // ── Identity Provider Subroutes ──
-    if let Some(id) = path.strip_prefix("/admin/identity-providers/") {
-        if method == Method::DELETE {
-            let _ = store::delete_identity_provider(id).await;
-            return Response::builder().status(StatusCode::OK).body(String::new()).unwrap();
+    if let Some(rest) = path.strip_prefix("/admin/identity-providers/") {
+        if let Some((id, action)) = rest.split_once('/') {
+            if action == "toggle" && method == Method::POST {
+                if let Ok(Some(mut idp)) = store::get_identity_provider(id).await {
+                    idp.enabled = !idp.enabled;
+                    if let Err(e) = store::save_identity_provider(&idp).await {
+                        return error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("Failed to update IDP: {e}"));
+                    }
+                    return html_response(views::idps::render_idp_row(&idp).into_string());
+                } else {
+                    return error_response(StatusCode::NOT_FOUND, "Identity provider not found");
+                }
+            } else if action == "modal/edit" && method == Method::GET {
+                if let Ok(Some(idp)) = store::get_identity_provider(id).await {
+                    return html_response(views::idps::render_edit_idp_modal(&idp).into_string());
+                } else {
+                    return error_response(StatusCode::NOT_FOUND, "Identity provider not found");
+                }
+            } else if action == "update" && method == Method::POST {
+                let form = parse_form(body);
+                let client_id = form_value(&form, "client_id").unwrap_or("").trim().to_string();
+                let client_secret = form_value(&form, "client_secret").unwrap_or("").trim().to_string();
+                let enabled = form_value(&form, "enabled").map(|v| v == "true" || v == "on").unwrap_or(false);
+
+                if let Ok(Some(mut idp)) = store::get_identity_provider(id).await {
+                    if !client_id.is_empty() {
+                        idp.client_id = client_id;
+                    }
+                    if !client_secret.is_empty() {
+                        idp.client_secret = client_secret;
+                    }
+                    idp.enabled = enabled;
+                    if let Err(e) = store::save_identity_provider(&idp).await {
+                        return error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("Failed to update IDP: {e}"));
+                    }
+                    return redirect_response("/admin/identity-providers");
+                } else {
+                    return error_response(StatusCode::NOT_FOUND, "Identity provider not found");
+                }
+            }
+        } else {
+            let id = rest;
+            if method == Method::DELETE {
+                let _ = store::delete_identity_provider(id).await;
+                return Response::builder().status(StatusCode::OK).body(String::new()).unwrap();
+            }
         }
     }
 
@@ -736,7 +782,10 @@ async fn resolve_admin_session(headers: &HeaderMap) -> Result<AdminSession, Resp
         None => {
             return Err(Response::builder()
                 .status(StatusCode::SEE_OTHER)
-                .header("location", "/admin/login?return_to=/admin")
+                .header(
+                    "location",
+                    "/authorize?client_id=lid-admin&redirect_uri=/admin&response_type=code&scope=openid+email+profile&state=admin_login",
+                )
                 .body(String::new())
                 .unwrap());
         }

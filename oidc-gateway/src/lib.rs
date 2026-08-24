@@ -439,7 +439,10 @@ async fn handle(
                 let return_to = params.iter().find(|(k, _)| k == "return_to").map(|(_, v)| v.as_str()).unwrap_or("/admin");
                 Ok(Response::builder()
                     .status(StatusCode::SEE_OTHER)
-                    .header("location", format!("/admin/login?return_to={return_to}"))
+                    .header(
+                        "location",
+                        format!("/authorize?client_id=lid-admin&redirect_uri={return_to}&response_type=code&scope=openid+email+profile&state=direct_login"),
+                    )
                     .body(String::new())
                     .unwrap())
             }
