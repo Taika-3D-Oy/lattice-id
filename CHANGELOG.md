@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-08-24
+
+### Added
+
+- **Dynamic Theming & Modern Presets Engine**:
+  - Implemented dedicated theme engine (`theme.rs`) supporting 6 built-in presets: `taika-dark` (default), `taika-light`, `glassmorphic` (frosted glass blur), `cyberpunk` (neon cyan & pink grid), `minimal-noir` (luxury monochrome), and `neo-brutalist` (bold 3px black borders & hard shadows).
+  - Dynamic resolution hierarchy: Built-in Base Preset $\rightarrow$ System Global Default Theme $\rightarrow$ Per-OAuth-Client Theme Override.
+  - Automatic `:root` CSS variables generator for customizable colors, typography, card background, border, shadow, backdrop blur, and inputs.
+  - Custom Google Fonts & Web Fonts loading via configurable `font_url` and `font_family`.
+- **Comprehensive White-Labeling**:
+  - Ability to fully customize brand and application titles (e.g. from "Lattice-ID" to "Taika ID" or custom portal name) purely via theme configuration.
+  - Support for custom logo URLs, height settings, and favicon URLs with strict protocol/URL safety validation.
+  - Customizable footer copyright notice, terms/privacy/help links, and "Powered by" text with option to completely hide vendor branding (`hide_powered_by`).
+- **Surface-Wide Theming**:
+  - Refactored login, registration, MFA (TOTP, Passkeys, Recovery Codes), consent screen, account dashboard, and device flow pages to dynamically use the theme engine.
+- **Admin UI & REST Management**:
+  - Added Global White-Labeling & Theme Defaults form in `/admin/settings`.
+  - Added per-client theme editor card in `/admin/clients/:id` and new client registration modal.
+  - Added `theme` support to Client REST APIs (`POST /api/clients`, `PUT /api/clients/:id`, and `GET /api/clients`).
+- **Documentation**:
+  - Added comprehensive [`THEMING.md`](THEMING.md) guide with preset overviews, CSS variable tables, admin/API instructions, security rules, and copy-paste theme recipes.
+
 ## [1.7.1] - 2026-08-24
 
 ### Added

@@ -112,18 +112,35 @@ pub fn render_new_client_modal() -> Markup {
                         }
                     }
 
-                    h3 style="margin-top: 16px; margin-bottom: 8px;" { "Branding & Customization (Optional)" }
-                    div class="form-row" {
-                        label for="app_name" { "Display Name" }
-                        input type="text" id="app_name" name="app_name" placeholder="Custom Login Title";
+                    h3 style="margin-top: 20px; margin-bottom: 8px;" { "Branding & Customization (Optional)" }
+                    div class="form-grid" style="display:grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;" {
+                        div class="form-group" {
+                            label for="app_name" { "Display Title" }
+                            input type="text" id="app_name" name="app_name" placeholder="Custom Login Title";
+                        }
+                        div class="form-group" {
+                            label for="theme_preset" { "Theme Preset" }
+                            select id="theme_preset" name="theme_preset" {
+                                option value="" { "(Inherit System Default)" }
+                                option value="taika-dark" { "Taika Dark" }
+                                option value="taika-light" { "Taika Light" }
+                                option value="glassmorphic" { "Glassmorphic" }
+                                option value="cyberpunk" { "Cyberpunk" }
+                                option value="minimal-noir" { "Minimal Noir" }
+                                option value="neo-brutalist" { "Neo-Brutalist" }
+                            }
+                        }
                     }
-                    div class="form-row" {
-                        label for="logo_url" { "Logo URL" }
-                        input type="text" id="logo_url" name="logo_url" placeholder="https://example.com/logo.svg";
-                    }
-                    div class="form-row" {
-                        label for="primary_color" { "Brand Color" }
-                        input type="text" id="primary_color" name="primary_color" placeholder="#3b82f6";
+
+                    div class="form-grid" style="display:grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;" {
+                        div class="form-group" {
+                            label for="logo_url" { "Logo URL" }
+                            input type="text" id="logo_url" name="logo_url" placeholder="https://example.com/logo.svg";
+                        }
+                        div class="form-group" {
+                            label for="primary_color" { "Brand Color (HEX)" }
+                            input type="text" id="primary_color" name="primary_color" placeholder="#10b981";
+                        }
                     }
 
                     div class="modal-actions" {
@@ -139,6 +156,8 @@ pub fn render_new_client_modal() -> Markup {
 pub async fn render_client_detail_page(session: &AdminSession, client: &OidcClient) -> Response<String> {
     let redirect_uris_text = client.redirect_uris.join("\n");
     let is_confidential = client.client_secret.is_some();
+    let theme = client.theme.clone().unwrap_or_default();
+    let current_preset = theme.theme_preset.as_deref().unwrap_or("");
 
     let content = html! {
         div class="breadcrumb" {
@@ -205,6 +224,95 @@ pub async fn render_client_detail_page(session: &AdminSession, client: &OidcClie
                     div class="form-hint" { "One URL per line. Absolute HTTP/HTTPS URLs." }
                 }
                 button type="submit" class="btn btn-primary" { "Save Redirect URIs" }
+            }
+        }
+
+        // ── Theme & White-Labeling Card ──
+        div class="card" {
+            div class="card-header" {
+                span class="card-title" { "Theme & White-Labeling Override" }
+            }
+            p class="text-muted" style="margin-bottom: 20px; font-size: 13px;" {
+                "Customize the login, registration, and consent screens shown to users authenticating with this client application."
+            }
+            form hx-post={"/admin/clients/" (client.client_id) "/theme"} hx-target="body" {
+                div class="form-grid" style="display:grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px;" {
+                    div class="form-group" {
+                        label for="app_name" { "Custom Brand Name" }
+                        input type="text" id="app_name" name="app_name" value=(theme.app_name) placeholder="Taika ID / My App";
+                    }
+                    div class="form-group" {
+                        label for="theme_preset" { "Theme Preset" }
+                        select id="theme_preset" name="theme_preset" {
+                            option value="" selected[current_preset.is_empty()] { "(Inherit System Default)" }
+                            option value="taika-dark" selected[current_preset == "taika-dark"] { "Taika Dark (Emerald & Slate)" }
+                            option value="taika-light" selected[current_preset == "taika-light"] { "Taika Light (Clean Minimalist)" }
+                            option value="glassmorphic" selected[current_preset == "glassmorphic"] { "Glassmorphic (Frosted Glass)" }
+                            option value="cyberpunk" selected[current_preset == "cyberpunk"] { "Cyberpunk (Neon Cyan & Pink)" }
+                            option value="minimal-noir" selected[current_preset == "minimal-noir"] { "Minimal Noir (Monochrome)" }
+                            option value="neo-brutalist" selected[current_preset == "neo-brutalist"] { "Neo-Brutalist (Bold Borders & Shadows)" }
+                        }
+                    }
+                }
+
+                div class="form-grid" style="display:grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px;" {
+                    div class="form-group" {
+                        label for="logo_url" { "Logo URL" }
+                        input type="text" id="logo_url" name="logo_url" value=(theme.logo_url.unwrap_or_default()) placeholder="https://example.com/logo.svg";
+                    }
+                    div class="form-group" {
+                        label for="primary_color" { "Brand Primary Color (HEX)" }
+                        input type="text" id="primary_color" name="primary_color" value=(theme.primary_color.unwrap_or_default()) placeholder="#10b981";
+                    }
+                }
+
+                div class="form-grid" style="display:grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px;" {
+                    div class="form-group" {
+                        label for="background_color" { "Background Color" }
+                        input type="text" id="background_color" name="background_color" value=(theme.background_color.unwrap_or_default()) placeholder="#0b0f19";
+                    }
+                    div class="form-group" {
+                        label for="background_image_url" { "Background Image URL" }
+                        input type="text" id="background_image_url" name="background_image_url" value=(theme.background_image_url.unwrap_or_default()) placeholder="https://example.com/wallpaper.jpg";
+                    }
+                }
+
+                div class="form-grid" style="display:grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px;" {
+                    div class="form-group" {
+                        label for="font_family" { "Font Family" }
+                        input type="text" id="font_family" name="font_family" value=(theme.font_family.unwrap_or_default()) placeholder="'Inter', sans-serif";
+                    }
+                    div class="form-group" {
+                        label for="font_url" { "Web Font Stylesheet URL" }
+                        input type="text" id="font_url" name="font_url" value=(theme.font_url.unwrap_or_default()) placeholder="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap";
+                    }
+                }
+
+                div class="form-grid" style="display:grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px;" {
+                    div class="form-group" {
+                        label for="powered_by_text" { "Footer 'Powered by' Text" }
+                        input type="text" id="powered_by_text" name="powered_by_text" value=(theme.powered_by_text.unwrap_or_default()) placeholder="Powered by Taika ID";
+                    }
+                    div class="form-group" {
+                        label for="footer_text" { "Custom Footer / Copyright Notice" }
+                        input type="text" id="footer_text" name="footer_text" value=(theme.footer_text.unwrap_or_default()) placeholder="© 2026 My App. All rights reserved.";
+                    }
+                }
+
+                div class="form-group" style="margin-bottom: 16px;" {
+                    label class="checkbox-label" style="display:flex; align-items:center; gap:8px; cursor:pointer;" {
+                        input type="checkbox" name="hide_powered_by" value="true" checked[theme.hide_powered_by];
+                        span { "Hide 'Powered by' footer branding" }
+                    }
+                }
+
+                div class="form-group" style="margin-bottom: 20px;" {
+                    label for="custom_css" { "Custom CSS Overrides" }
+                    textarea id="custom_css" name="custom_css" rows="3" placeholder=":root { --radius: 20px; }" { (theme.custom_css.unwrap_or_default()) }
+                    div class="form-hint" { "Custom styling rules injected directly into this client's authentication view." }
+                }
+
+                button type="submit" class="btn btn-primary" { "Save Client Theme" }
             }
         }
 

@@ -31,14 +31,14 @@ pub fn render_layout(
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1.0";
-                title { (title) " — Lattice-ID Admin" }
+                title { (title) " — Taika ID Admin" }
                 link rel="stylesheet" href="/admin/style.css";
                 script src="/admin/htmx.min.js" {}
             }
             body class="app-shell" {
                 // ── Topbar ──
                 header class="topbar" {
-                    a href="/admin" class="topbar-brand" { "⬡ Lattice ID" }
+                    a href="/admin" class="topbar-brand" { "⬡ Taika ID" }
 
                     @if !session.tenants.is_empty() {
                         div class="tenant-switcher" {

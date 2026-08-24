@@ -530,6 +530,8 @@ pub async fn list_clients(auth: Option<&str>) -> Result<Response<String>, String
                 "name": c.name,
                 "redirect_uris": c.redirect_uris,
                 "grant_types": c.grant_types,
+                "theme": c.theme,
+                "first_party": c.first_party,
             })
         })
         .collect();
@@ -633,6 +635,8 @@ pub async fn create_client(auth: Option<&str>, body: &[u8]) -> Result<Response<S
         "name": client.name,
         "redirect_uris": client.redirect_uris,
         "grant_types": client.grant_types,
+        "theme": client.theme,
+        "first_party": client.first_party,
     });
     // Only show raw secret once at creation time
     if let Some((raw_secret, _)) = client_secret {
@@ -658,6 +662,11 @@ pub async fn update_client(
         redirect_uris: Option<Vec<String>>,
         name: Option<String>,
         grant_types: Option<Vec<String>>,
+        theme: Option<Option<store::ClientTheme>>,
+        first_party: Option<bool>,
+        backchannel_logout_uri: Option<String>,
+        backchannel_logout_session_required: Option<bool>,
+        id_token_signed_response_alg: Option<String>,
     }
 
     let req: Req = serde_json::from_slice(body).map_err(|e| format!("invalid JSON: {e}"))?;
@@ -682,6 +691,25 @@ pub async fn update_client(
     if let Some(grant_types) = req.grant_types {
         client.grant_types = grant_types;
     }
+    if let Some(theme_opt) = req.theme {
+        client.theme = theme_opt;
+    }
+    if let Some(fp) = req.first_party {
+        client.first_party = fp;
+    }
+    if let Some(uri) = req.backchannel_logout_uri {
+        client.backchannel_logout_uri = if uri.is_empty() { None } else { Some(uri) };
+    }
+    if let Some(req_sess) = req.backchannel_logout_session_required {
+        client.backchannel_logout_session_required = req_sess;
+    }
+    if let Some(alg) = req.id_token_signed_response_alg {
+        client.id_token_signed_response_alg = match alg.as_str() {
+            "RS256" | "" => None,
+            "ES256" => Some("ES256".to_string()),
+            other => return Err(format!("unsupported id_token_signed_response_alg: {other}")),
+        };
+    }
 
     store::save_client(&client).await?;
 
@@ -699,6 +727,8 @@ pub async fn update_client(
         "name": client.name,
         "redirect_uris": client.redirect_uris,
         "grant_types": client.grant_types,
+        "theme": client.theme,
+        "first_party": client.first_party,
     }))
 }
 

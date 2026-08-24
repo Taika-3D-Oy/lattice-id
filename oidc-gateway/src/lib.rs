@@ -37,6 +37,7 @@ mod region_authority;
 mod service_client;
 mod social;
 mod store;
+pub mod theme;
 mod token;
 pub mod totp;
 mod userinfo;

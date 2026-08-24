@@ -171,47 +171,52 @@ pub async fn refresh_idp_session_cookie_header(headers: &HeaderMap) -> Option<St
 
 // ── Shared page chrome ──────────────────────────────────────
 
-fn page_head(title: &str) -> String {
+fn page_head(title: &str, theme: &crate::store::ClientTheme) -> String {
+    let app_name = crate::util::html_escape(&theme.app_name);
+    let head_tags = crate::theme::render_head_tags(theme);
+    let css_vars = crate::theme::render_css_variables(theme);
     format!(
         r#"<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title} — Lattice-ID</title>
+<title>{title} — {app_name}</title>
+{head_tags}
 <style>
 *{{margin:0;padding:0;box-sizing:border-box}}
-body{{font-family:system-ui,-apple-system,sans-serif;background:#f8fafc;min-height:100vh;padding:24px}}
+{css_vars}
+body{{font-family:var(--font-family);background:var(--bg);min-height:100vh;padding:24px;color:var(--text)}}
 .container{{max-width:600px;margin:0 auto}}
-.card{{background:#fff;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,.1);padding:32px;margin-bottom:20px}}
-h1{{font-size:24px;font-weight:600;color:#0f172a;margin-bottom:8px}}
-h2{{font-size:18px;font-weight:600;color:#0f172a;margin-bottom:16px}}
-.sub{{color:#64748b;font-size:14px;margin-bottom:24px}}
+.card{{background:var(--card-bg);border:var(--card-border);box-shadow:var(--card-shadow);backdrop-filter:blur(var(--card-backdrop-blur));-webkit-backdrop-filter:blur(var(--card-backdrop-blur));border-radius:var(--radius);padding:32px;margin-bottom:20px}}
+h1{{font-size:24px;font-weight:700;color:var(--text);margin-bottom:8px}}
+h2{{font-size:18px;font-weight:700;color:var(--text);margin-bottom:16px}}
+.sub{{color:var(--text-muted);font-size:14px;margin-bottom:24px}}
 .nav{{display:flex;gap:16px;margin-bottom:24px;flex-wrap:wrap}}
-.nav a{{color:#2563eb;text-decoration:none;font-size:14px;font-weight:500}}
+.nav a{{color:var(--primary);text-decoration:none;font-size:14px;font-weight:600}}
 .nav a:hover{{text-decoration:underline}}
-.nav a.active{{color:#0f172a;font-weight:600;text-decoration:underline}}
-label{{display:block;font-size:14px;font-weight:500;color:#334155;margin-bottom:6px}}
-input[type=text],input[type=password]{{width:100%;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px;font-size:15px;margin-bottom:16px;outline:none}}
-input:focus{{border-color:#2563eb;box-shadow:0 0 0 3px #2563eb1a}}
-.btn{{display:inline-flex;align-items:center;gap:6px;padding:10px 20px;border-radius:8px;font-size:14px;font-weight:500;cursor:pointer;border:none;text-decoration:none;transition:background .15s}}
-.btn-primary{{background:#2563eb;color:#fff}}.btn-primary:hover{{background:#1d4ed8}}
-.btn-danger{{background:#dc2626;color:#fff}}.btn-danger:hover{{background:#b91c1c}}
-.btn-outline{{background:#fff;color:#334155;border:1px solid #cbd5e1}}.btn-outline:hover{{background:#f1f5f9}}
+.nav a.active{{color:var(--text);font-weight:700;text-decoration:underline}}
+label{{display:block;font-size:13px;font-weight:600;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.04em}}
+input[type=text],input[type=password]{{width:100%;padding:12px 14px;border:1px solid var(--input-border);border-radius:calc(var(--radius) * 0.7);background:var(--input-bg);color:var(--input-text);font-size:15px;margin-bottom:16px;outline:none;transition:all .15s ease}}
+input:focus{{border-color:var(--primary);box-shadow:0 0 0 3px rgba(16,185,129,.25)}}
+.btn{{display:inline-flex;align-items:center;gap:6px;padding:10px 20px;border-radius:calc(var(--radius) * 0.7);font-size:14px;font-weight:600;cursor:pointer;border:none;text-decoration:none;transition:all .15s ease}}
+.btn-primary{{background:var(--primary);color:var(--button-text)}}.btn-primary:hover{{background:var(--primary-hover);transform:translateY(-1px)}}
+.btn-danger{{background:#ef4444;color:#fff}}.btn-danger:hover{{background:#dc2626}}
+.btn-outline{{background:transparent;color:var(--text);border:1px solid var(--input-border)}}.btn-outline:hover{{background:rgba(255,255,255,.08)}}
 .badge{{display:inline-block;padding:2px 10px;border-radius:9999px;font-size:12px;font-weight:600}}
-.badge-ok{{background:#dcfce7;color:#166534}}
-.badge-off{{background:#f1f5f9;color:#64748b}}
+.badge-ok{{background:rgba(16,185,129,.2);color:#10b981}}
+.badge-off{{background:rgba(255,255,255,.1);color:var(--text-muted)}}
 table{{width:100%;border-collapse:collapse;font-size:14px}}
-th{{text-align:left;padding:8px 12px;border-bottom:2px solid #e2e8f0;color:#64748b;font-weight:500}}
-td{{padding:8px 12px;border-bottom:1px solid #f1f5f9}}
-.msg-ok{{background:#dcfce7;border:1px solid #86efac;color:#166534;padding:10px 14px;border-radius:8px;margin-bottom:16px;font-size:14px}}
-.msg-err{{background:#fef2f2;border:1px solid #fecaca;color:#b91c1c;padding:10px 14px;border-radius:8px;margin-bottom:16px;font-size:14px}}
-.detail-row{{display:flex;justify-content:space-between;align-items:center;padding:12px 0;border-bottom:1px solid #f1f5f9}}
+th{{text-align:left;padding:8px 12px;border-bottom:2px solid var(--input-border);color:var(--text-muted);font-weight:600}}
+td{{padding:8px 12px;border-bottom:1px solid var(--input-border);color:var(--text)}}
+.msg-ok{{background:rgba(16,185,129,.15);border:1px solid rgba(16,185,129,.3);color:#10b981;padding:10px 14px;border-radius:calc(var(--radius) * 0.6);margin-bottom:16px;font-size:14px}}
+.msg-err{{background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.3);color:#ef4444;padding:10px 14px;border-radius:calc(var(--radius) * 0.6);margin-bottom:16px;font-size:14px}}
+.detail-row{{display:flex;justify-content:space-between;align-items:center;padding:12px 0;border-bottom:1px solid var(--input-border)}}
 .detail-row:last-child{{border-bottom:none}}
-.detail-label{{color:#64748b;font-size:14px}}
-.detail-value{{font-weight:500;color:#0f172a;font-size:14px}}
-.passkey-error{{color:#b91c1c;font-size:13px;margin-top:8px;display:none}}
-.footer{{text-align:center;margin-top:32px;font-size:12px;color:#94a3b8}}
+.detail-label{{color:var(--text-muted);font-size:14px}}
+.detail-value{{font-weight:600;color:var(--text);font-size:14px}}
+.passkey-error{{color:#ef4444;font-size:13px;margin-top:8px;display:none}}
+.footer{{text-align:center;margin-top:32px;font-size:13px;color:var(--text-muted)}}
 </style>
 </head>
 <body>
@@ -235,18 +240,22 @@ fn page_nav(active: &str) -> String {
         html.push_str(&format!(r#"<a href="{href}"{cls}>{label}</a>"#));
     }
     html.push_str(
-        r#"<a href="/account/logout" style="margin-left:auto;color:#dc2626">Sign out</a>"#,
+        r#"<a href="/account/logout" style="margin-left:auto;color:#ef4444">Sign out</a>"#,
     );
     html.push_str("</nav>");
     html
 }
 
-const PAGE_FOOT: &str = r#"<p class="footer">Powered by Lattice-ID</p></div></body></html>"#;
+fn page_foot(theme: &crate::store::ClientTheme) -> String {
+    let footer_html = crate::theme::render_footer(theme, None);
+    format!("{footer_html}</div></body></html>")
+}
 
 // ── GET /account ────────────────────────────────────────────
 
 pub async fn dashboard(headers: &HeaderMap) -> Result<Response<String>, String> {
     let (user, _csrf) = get_user_or_redirect!(headers);
+    let theme = crate::theme::resolve_global_theme().await;
 
     let passkey_count = user.passkey_credentials.len();
     let mfa_status = if user.totp_enabled {
@@ -290,11 +299,11 @@ pub async fn dashboard(headers: &HeaderMap) -> Result<Response<String>, String> 
 </div>
 </div>
 {foot}"#,
-        head = page_head("My Account"),
+        head = page_head("My Account", &theme),
         nav = page_nav("/account"),
         email = util::html_escape(&user.email),
         name = util::html_escape(&user.name),
-        foot = PAGE_FOOT,
+        foot = page_foot(&theme),
     );
 
     Ok(html_response(&html))
@@ -308,6 +317,7 @@ pub async fn passkeys_page(
     err: Option<&str>,
 ) -> Result<Response<String>, String> {
     let (user, csrf) = get_user_or_redirect!(headers);
+    let theme = crate::theme::resolve_global_theme().await;
 
     let msg_html = match msg {
         Some(m) => format!(r#"<div class="msg-ok">{}</div>"#, util::html_escape(m)),
@@ -430,25 +440,35 @@ async function registerPasskey() {{
     errEl.style.display = 'none';
     btn.disabled = true;
     btn.textContent = 'Waiting for passkey\u2026';
+    btn.textContent = 'Waiting for authenticator\u2026';
+
     try {{
-        var opts = JSON.parse(JSON.stringify(REG_OPTIONS));
-        var pk = opts.publicKey;
-        pk.challenge = b64urlDecode(pk.challenge);
-        pk.user.id = b64urlDecode(pk.user.id);
-        if (pk.excludeCredentials) {{
-            pk.excludeCredentials = pk.excludeCredentials.map(function(c) {{
-                c.id = b64urlDecode(c.id); return c;
+        var r = await fetch('/passkeys/register-options', {{
+            method: 'POST',
+            headers: {{ 'content-type': 'application/json' }},
+            body: '{{}}'
+        }});
+        if (!r.ok) throw new Error(await r.text());
+        var d = await r.json();
+        CHALLENGE_TOKEN = d.token;
+        var opts = d.publicKey;
+        opts.challenge = b64urlDecode(opts.challenge);
+        opts.user.id = b64urlDecode(opts.user.id);
+        if (opts.excludeCredentials) {{
+            opts.excludeCredentials = opts.excludeCredentials.map(function(c) {{
+                c.id = b64urlDecode(c.id);
+                return c;
             }});
         }}
-        var cred = await navigator.credentials.create({{ publicKey: pk }});
-        var name = document.getElementById('pk-name').value || 'My passkey';
-        // Submit via hidden form POST
+        var cred = await navigator.credentials.create({{ publicKey: opts }});
         var form = document.createElement('form');
         form.method = 'POST';
         form.action = '/account/passkeys/register';
-        function addField(n, v) {{
+        function addField(k, v) {{
             var i = document.createElement('input');
-            i.type = 'hidden'; i.name = n; i.value = v;
+            i.type = 'hidden';
+            i.name = k;
+            i.value = v;
             form.appendChild(i);
         }}
         addField('token', CHALLENGE_TOKEN);
@@ -458,11 +478,7 @@ async function registerPasskey() {{
         document.body.appendChild(form);
         form.submit();
     }} catch(e) {{
-        if (e.name === 'NotAllowedError') {{
-            errEl.textContent = 'Passkey registration was cancelled.';
-        }} else {{
-            errEl.textContent = 'Error: ' + (e.message || e);
-        }}
+        errEl.textContent = 'Error: ' + (e.message || e);
         errEl.style.display = 'block';
         btn.disabled = false;
         btn.textContent = 'Add Passkey';
@@ -471,14 +487,14 @@ async function registerPasskey() {{
 
 if (!window.PublicKeyCredential) {{
     document.getElementById('register-card').innerHTML =
-        '<p style="color:#94a3b8">Passkeys are not supported in this browser.</p>';
+        '<p style="color:var(--text-muted)">Passkeys are not supported in this browser.</p>';
 }}
 </script>
 
 {foot}"##,
-        head = page_head("Passkeys"),
+        head = page_head("Passkeys", &theme),
         nav = page_nav("/account/passkeys"),
-        foot = PAGE_FOOT,
+        foot = page_foot(&theme),
     );
 
     Ok(html_response(&html))
@@ -619,6 +635,7 @@ pub async fn mfa_page(
     err: Option<&str>,
 ) -> Result<Response<String>, String> {
     let (user, csrf) = get_user_or_redirect!(headers);
+    let theme = crate::theme::resolve_global_theme().await;
 
     let msg_html = match msg {
         Some(m) => format!(r#"<div class="msg-ok">{}</div>"#, util::html_escape(m)),
@@ -634,7 +651,7 @@ pub async fn mfa_page(
             r#"<div class="card">
 <h2>Two-Factor Authentication</h2>
 <p style="margin-bottom:16px">TOTP is <span class="badge badge-ok">enabled</span> for your account.</p>
-<p style="color:#64748b;font-size:14px;margin-bottom:16px">Disabling MFA will revoke all your active sessions.</p>
+<p style="color:var(--text-muted);font-size:14px;margin-bottom:16px">Disabling MFA will revoke all your active sessions.</p>
 <form method="POST" action="/account/mfa/disable">
 <input type="hidden" name="csrf" value="{csrf_val}">
 <label for="password">Enter your password to confirm</label>
@@ -649,7 +666,7 @@ pub async fn mfa_page(
             r#"<div class="card">
 <h2>Two-Factor Authentication</h2>
 <p style="margin-bottom:16px">MFA is <span class="badge badge-off">not set up</span>.</p>
-<p style="color:#64748b;font-size:14px;margin-bottom:16px">Add an extra layer of security with a TOTP authenticator app.</p>
+<p style="color:var(--text-muted);font-size:14px;margin-bottom:16px">Add an extra layer of security with a TOTP authenticator app.</p>
 <form method="POST" action="/account/mfa/setup">
 <input type="hidden" name="csrf" value="{csrf_val}">
 <button type="submit" class="btn btn-primary">Set up MFA</button>
@@ -661,9 +678,9 @@ pub async fn mfa_page(
 
     let html = format!(
         "{head}\n{nav}\n{msg_html}\n{err_html}\n<h1>Two-Factor Authentication</h1>\n<p class=\"sub\">Protect your account with TOTP.</p>\n{content}\n{foot}",
-        head = page_head("MFA"),
+        head = page_head("MFA", &theme),
         nav = page_nav("/account/mfa"),
-        foot = PAGE_FOOT,
+        foot = page_foot(&theme),
     );
 
     Ok(html_response(&html))
@@ -673,6 +690,7 @@ pub async fn mfa_page(
 
 pub async fn mfa_setup(headers: &HeaderMap) -> Result<Response<String>, String> {
     let (user, _csrf) = get_user_or_redirect!(headers);
+    let theme = crate::theme::resolve_global_theme().await;
 
     if user.totp_enabled {
         return mfa_page(headers, None, Some("MFA is already enabled.")).await;
@@ -701,9 +719,9 @@ pub async fn mfa_setup(headers: &HeaderMap) -> Result<Response<String>, String> 
 
 <div class="card">
 <p style="margin-bottom:12px"><strong>Manual entry key:</strong></p>
-<code style="background:#f1f5f9;padding:8px 12px;border-radius:6px;font-size:14px;word-break:break-all;display:block;margin-bottom:16px">{secret}</code>
-<p style="margin-bottom:8px;font-size:14px;color:#64748b">Or scan this URI in your authenticator:</p>
-<code style="background:#f1f5f9;padding:8px 12px;border-radius:6px;font-size:12px;word-break:break-all;display:block;margin-bottom:24px">{otpauth_uri}</code>
+<code style="background:var(--input-bg);border:1px solid var(--input-border);color:var(--text);padding:8px 12px;border-radius:6px;font-size:14px;word-break:break-all;display:block;margin-bottom:16px">{secret}</code>
+<p style="margin-bottom:8px;font-size:14px;color:var(--text-muted)">Or scan this URI in your authenticator:</p>
+<code style="background:var(--input-bg);border:1px solid var(--input-border);color:var(--text);padding:8px 12px;border-radius:6px;font-size:12px;word-break:break-all;display:block;margin-bottom:24px">{otpauth_uri}</code>
 
 <form method="POST" action="/account/mfa/confirm">
 <label for="code">Enter the 6-digit code from your app</label>
@@ -712,11 +730,11 @@ pub async fn mfa_setup(headers: &HeaderMap) -> Result<Response<String>, String> 
 </form>
 </div>
 {foot}"#,
-        head = page_head("Set Up MFA"),
+        head = page_head("Set Up MFA", &theme),
         nav = page_nav("/account/mfa"),
         secret = util::html_escape(&secret),
         otpauth_uri = util::html_escape(&otpauth_uri),
-        foot = PAGE_FOOT,
+        foot = page_foot(&theme),
     );
 
     Ok(html_response(&html))
@@ -726,6 +744,7 @@ pub async fn mfa_setup(headers: &HeaderMap) -> Result<Response<String>, String> 
 
 pub async fn mfa_confirm(headers: &HeaderMap, body: &[u8]) -> Result<Response<String>, String> {
     let (user, _csrf) = get_user_or_redirect!(headers);
+    let theme = crate::theme::resolve_global_theme().await;
 
     let form = util::parse_form(body);
     let code = util::form_value(&form, "code").ok_or("missing code")?;
@@ -746,8 +765,8 @@ pub async fn mfa_confirm(headers: &HeaderMap, body: &[u8]) -> Result<Response<St
 
 <div class="card">
 <p style="margin-bottom:12px"><strong>Manual entry key:</strong></p>
-<code style="background:#f1f5f9;padding:8px 12px;border-radius:6px;font-size:14px;word-break:break-all;display:block;margin-bottom:16px">{secret}</code>
-<code style="background:#f1f5f9;padding:8px 12px;border-radius:6px;font-size:12px;word-break:break-all;display:block;margin-bottom:24px">{otpauth_uri}</code>
+<code style="background:var(--input-bg);border:1px solid var(--input-border);color:var(--text);padding:8px 12px;border-radius:6px;font-size:14px;word-break:break-all;display:block;margin-bottom:16px">{secret}</code>
+<code style="background:var(--input-bg);border:1px solid var(--input-border);color:var(--text);padding:8px 12px;border-radius:6px;font-size:12px;word-break:break-all;display:block;margin-bottom:24px">{otpauth_uri}</code>
 
 <form method="POST" action="/account/mfa/confirm">
 <label for="code">Enter the 6-digit code from your app</label>
@@ -756,11 +775,11 @@ pub async fn mfa_confirm(headers: &HeaderMap, body: &[u8]) -> Result<Response<St
 </form>
 </div>
 {foot}"#,
-            head = page_head("Set Up MFA"),
+            head = page_head("Set Up MFA", &theme),
             nav = page_nav("/account/mfa"),
             secret = util::html_escape(secret),
             otpauth_uri = util::html_escape(&otpauth_uri),
-            foot = PAGE_FOOT,
+            foot = page_foot(&theme),
         );
         return Ok(html_response(&html));
     }
@@ -794,14 +813,14 @@ pub async fn mfa_confirm(headers: &HeaderMap, body: &[u8]) -> Result<Response<St
 
 <div class="card">
 <ol style="padding-left:20px;margin-bottom:16px">{codes_html}</ol>
-<p style="color:#b91c1c;font-size:14px;font-weight:500">These codes will not be shown again.</p>
+<p style="color:#ef4444;font-size:14px;font-weight:500">These codes will not be shown again.</p>
 </div>
 
 <a href="/account/mfa" class="btn btn-outline">Back to MFA settings</a>
 {foot}"#,
-        head = page_head("Recovery Codes"),
+        head = page_head("Recovery Codes", &theme),
         nav = page_nav("/account/mfa"),
-        foot = PAGE_FOOT,
+        foot = page_foot(&theme),
     );
 
     Ok(html_response(&html))

@@ -88,6 +88,7 @@ pub async fn start(body_bytes: &[u8], issuer: &str) -> Result<Response<String>, 
 
 /// GET /device[?user_code=...] — HTML page where the user enters their user code.
 pub async fn page(query: &str) -> Response<String> {
+    let theme = crate::theme::resolve_global_theme().await;
     let params = util::parse_query(query);
     let prefilled_code = params
         .iter()
@@ -95,35 +96,58 @@ pub async fn page(query: &str) -> Response<String> {
         .map(|(_, v)| v.as_str())
         .unwrap_or("");
 
+    render_device_page(prefilled_code, None, &theme)
+}
+
+fn render_device_page(prefilled_code: &str, error: Option<&str>, theme: &store::ClientTheme) -> Response<String> {
+    let app_name = util::html_escape(&theme.app_name);
+    let head_tags = crate::theme::render_head_tags(theme);
+    let css_vars = crate::theme::render_css_variables(theme);
+    let logo_html = crate::theme::render_logo(theme);
+    let footer_html = crate::theme::render_footer(theme, None);
+
+    let error_html = match error {
+        Some(e) => format!(r#"<div class="error">{}</div>"#, util::html_escape(e)),
+        None => String::new(),
+    };
+
     let html = format!(
         r#"<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Device Activation</title>
+<title>Device Activation — {app_name}</title>
+{head_tags}
 <style>
-  body {{ font-family: -apple-system, BlinkMacSystemFont, sans-serif; background:#111827; color:#f9fafb; display:flex; justify-content:center; align-items:center; min-height:100vh; margin:0; }}
-  .card {{ background:#1f2937; border-radius:12px; padding:40px; max-width:400px; width:100%; box-shadow:0 4px 32px rgba(0,0,0,.5); }}
-  h1 {{ font-size:1.5rem; margin-bottom:8px; }}
-  p {{ color:#9ca3af; margin-bottom:24px; font-size:.95rem; }}
-  input {{ width:100%; box-sizing:border-box; padding:12px; border:1px solid #374151; border-radius:8px; background:#111827; color:#f9fafb; font-size:1.4rem; letter-spacing:.3em; text-align:center; text-transform:uppercase; }}
-  button {{ width:100%; margin-top:16px; padding:12px; border:none; border-radius:8px; background:#3b82f6; color:#fff; font-size:1rem; cursor:pointer; }}
-  button:hover {{ background:#2563eb; }}
-  .error {{ color:#f87171; margin-top:12px; font-size:.9rem; }}
+*{{margin:0;padding:0;box-sizing:border-box}}
+{css_vars}
+body {{ font-family: var(--font-family); background: var(--bg); color: var(--text); display:flex; justify-content:center; align-items:center; min-height:100vh; margin:0; padding:20px; }}
+.card {{ background: var(--card-bg); border: var(--card-border); box-shadow: var(--card-shadow); backdrop-filter: blur(var(--card-backdrop-blur)); -webkit-backdrop-filter: blur(var(--card-backdrop-blur)); border-radius: var(--radius); padding:40px; max-width:420px; width:100%; }}
+h1 {{ font-size:1.5rem; font-weight:700; color:var(--text); margin-bottom:8px; }}
+p {{ color:var(--text-muted); margin-bottom:24px; font-size:.95rem; }}
+input {{ width:100%; box-sizing:border-box; padding:14px; border:1px solid var(--input-border); border-radius:calc(var(--radius) * 0.7); background:var(--input-bg); color:var(--input-text); font-size:1.4rem; letter-spacing:.3em; text-align:center; text-transform:uppercase; outline:none; transition:all .15s ease; }}
+input:focus {{ border-color:var(--primary); box-shadow:0 0 0 3px rgba(16,185,129,.25); }}
+button {{ width:100%; margin-top:20px; padding:14px; border:none; border-radius:calc(var(--radius) * 0.7); background:var(--primary); color:var(--button-text); font-size:1rem; font-weight:600; cursor:pointer; transition:all .15s ease; }}
+button:hover {{ background:var(--primary-hover); transform:translateY(-1px); }}
+.error {{ background:rgba(239,68,68,.15); border:1px solid rgba(239,68,68,.3); color:#ef4444; border-radius:calc(var(--radius) * 0.6); padding:10px 14px; margin-top:16px; font-size:.9rem; text-align:center; }}
 </style>
 </head>
 <body>
 <div class="card">
+  {logo_html}
   <h1>Device Activation</h1>
-  <p>Enter the code displayed on your device to sign in.</p>
+  <p>Enter the code displayed on your device to sign in to {app_name}.</p>
   <form method="POST" action="/device">
     <input type="text" name="user_code" value="{prefilled_code}" placeholder="XXXX-XXXX" autocomplete="off" spellcheck="false" maxlength="9" required>
     <button type="submit">Continue</button>
   </form>
+  {error_html}
+  {footer_html}
 </div>
 </body>
-</html>"#
+</html>"#,
+        prefilled_code = util::html_escape(prefilled_code),
     );
 
     Response::builder()
@@ -150,13 +174,21 @@ pub async fn submit(body_bytes: &[u8], issuer: &str) -> Result<Response<String>,
         .await?
         .ok_or_else(|| "invalid or expired user code".to_string())?;
 
+    let theme = crate::theme::resolve_global_theme().await;
+
     if store::unix_now() > dc.expires_at {
-        return Ok(page_with_error(
-            "Code has expired. Please restart on your device.",
+        return Ok(render_device_page(
+            "",
+            Some("Code has expired. Please restart on your device."),
+            &theme,
         ));
     }
     if dc.status != "pending" {
-        return Ok(page_with_error("This code has already been used."));
+        return Ok(render_device_page(
+            "",
+            Some("This code has already been used."),
+            &theme,
+        ));
     }
 
     // Create a normal OIDC auth session that also carries the device_code.
@@ -194,63 +226,38 @@ pub async fn submit(body_bytes: &[u8], issuer: &str) -> Result<Response<String>,
 /// Approval and user_id capture happen in `login::complete_login_with_amr` when it
 /// detects the device sentinel; this page is purely visual confirmation.
 pub async fn complete(_query: &str) -> Response<String> {
-    let html = r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>Device Activated</title>
-<style>
-  body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background:#111827; color:#f9fafb; display:flex; justify-content:center; align-items:center; min-height:100vh; margin:0; }
-  .card { background:#1f2937; border-radius:12px; padding:40px; max-width:400px; width:100%; text-align:center; }
-  .check { font-size:4rem; margin-bottom:16px; }
-  h1 { font-size:1.5rem; }
-  p { color:#9ca3af; }
-</style>
-</head>
-<body>
-<div class="card">
-  <div class="check">✓</div>
-  <h1>Device Activated!</h1>
-  <p>You can close this window. Your device is now signed in.</p>
-</div>
-</body>
-</html>"#;
+    let theme = crate::theme::resolve_global_theme().await;
+    let app_name = util::html_escape(&theme.app_name);
+    let head_tags = crate::theme::render_head_tags(&theme);
+    let css_vars = crate::theme::render_css_variables(&theme);
+    let logo_html = crate::theme::render_logo(&theme);
+    let footer_html = crate::theme::render_footer(&theme, None);
 
-    Response::builder()
-        .status(StatusCode::OK)
-        .header("content-type", "text/html; charset=utf-8")
-        .header("cache-control", "no-store")
-        .body(html.to_string())
-        .unwrap()
-}
-
-fn page_with_error(error: &str) -> Response<String> {
-    let escaped = util::html_escape(error);
     let html = format!(
         r#"<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Device Activation</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Device Activated — {app_name}</title>
+{head_tags}
 <style>
-  body {{ font-family: -apple-system, BlinkMacSystemFont, sans-serif; background:#111827; color:#f9fafb; display:flex; justify-content:center; align-items:center; min-height:100vh; margin:0; }}
-  .card {{ background:#1f2937; border-radius:12px; padding:40px; max-width:400px; width:100%; }}
-  h1 {{ font-size:1.5rem; margin-bottom:8px; }}
-  p {{ color:#9ca3af; margin-bottom:24px; }}
-  input {{ width:100%; box-sizing:border-box; padding:12px; border:1px solid #374151; border-radius:8px; background:#111827; color:#f9fafb; font-size:1.4rem; letter-spacing:.3em; text-align:center; text-transform:uppercase; }}
-  button {{ width:100%; margin-top:16px; padding:12px; border:none; border-radius:8px; background:#3b82f6; color:#fff; font-size:1rem; cursor:pointer; }}
-  .error {{ color:#f87171; margin-top:12px; font-size:.9rem; }}
+*{{margin:0;padding:0;box-sizing:border-box}}
+{css_vars}
+body {{ font-family: var(--font-family); background: var(--bg); color: var(--text); display:flex; justify-content:center; align-items:center; min-height:100vh; margin:0; padding:20px; }}
+.card {{ background: var(--card-bg); border: var(--card-border); box-shadow: var(--card-shadow); backdrop-filter: blur(var(--card-backdrop-blur)); -webkit-backdrop-filter: blur(var(--card-backdrop-blur)); border-radius: var(--radius); padding:40px; max-width:420px; width:100%; text-align:center; }}
+.check {{ font-size:3.5rem; color:var(--primary); margin-bottom:16px; }}
+h1 {{ font-size:1.5rem; font-weight:700; color:var(--text); margin-bottom:8px; }}
+p {{ color:var(--text-muted); font-size:.95rem; margin-bottom:24px; }}
 </style>
 </head>
 <body>
 <div class="card">
-  <h1>Device Activation</h1>
-  <p>Enter the code displayed on your device to sign in.</p>
-  <form method="POST" action="/device">
-    <input type="text" name="user_code" placeholder="XXXX-XXXX" autocomplete="off" spellcheck="false" maxlength="9" required>
-    <button type="submit">Continue</button>
-  </form>
-  <div class="error">{escaped}</div>
+  {logo_html}
+  <div class="check">✓</div>
+  <h1>Device Activated!</h1>
+  <p>You can close this window. Your device is now signed in.</p>
+  {footer_html}
 </div>
 </body>
 </html>"#
@@ -262,6 +269,12 @@ fn page_with_error(error: &str) -> Response<String> {
         .header("cache-control", "no-store")
         .body(html)
         .unwrap()
+}
+
+#[cfg(test)]
+fn page_with_error(error: &str) -> Response<String> {
+    let theme = crate::theme::resolve_effective_theme(None, &store::RuntimeSettings::default());
+    render_device_page("", Some(error), &theme)
 }
 
 /// Generate an 8-character user-facing code in XXXX-XXXX format.

@@ -145,6 +145,8 @@ pub async fn handle_admin_route(
             let name = form_value(&form, "name").unwrap_or("").trim();
             let client_type = form_value(&form, "client_type").unwrap_or("confidential");
             let uris_raw = form_value(&form, "redirect_uris").unwrap_or("");
+            let app_name = form_value(&form, "app_name").filter(|s| !s.trim().is_empty()).unwrap_or(name).to_string();
+            let theme_preset = form_value(&form, "theme_preset").filter(|s| !s.trim().is_empty()).map(|s| s.to_string());
             let logo_url = form_value(&form, "logo_url").filter(|s| !s.trim().is_empty()).map(|s| s.to_string());
             let primary_color = form_value(&form, "primary_color").filter(|s| !s.trim().is_empty()).map(|s| s.to_string());
             let background_color = form_value(&form, "background_color").filter(|s| !s.trim().is_empty()).map(|s| s.to_string());
@@ -166,12 +168,14 @@ pub async fn handle_admin_route(
                 None
             };
 
-            let theme = if logo_url.is_some() || primary_color.is_some() || background_color.is_some() {
+            let theme = if logo_url.is_some() || primary_color.is_some() || background_color.is_some() || theme_preset.is_some() || app_name != name {
                 Some(ClientTheme {
-                    app_name: name.to_string(),
+                    app_name,
+                    theme_preset,
                     logo_url,
                     primary_color,
                     background_color,
+                    ..Default::default()
                 })
             } else {
                 None
@@ -314,6 +318,33 @@ pub async fn handle_admin_route(
             let allow_reg = form_value(&form, "allow_registration").map(|v| v == "true" || v == "on").unwrap_or(false);
             let mut settings = store::get_runtime_settings().await;
             settings.allow_registration = allow_reg;
+
+            let mut def_theme = settings.default_theme.clone().unwrap_or_default();
+            if let Some(app_name) = form_value(&form, "default_app_name") {
+                def_theme.app_name = app_name.trim().to_string();
+            }
+            if let Some(preset) = form_value(&form, "default_theme_preset") {
+                def_theme.theme_preset = if preset.is_empty() { None } else { Some(preset.to_string()) };
+            }
+            if let Some(logo_url) = form_value(&form, "default_logo_url") {
+                def_theme.logo_url = if logo_url.trim().is_empty() { None } else { Some(logo_url.trim().to_string()) };
+            }
+            if let Some(color) = form_value(&form, "default_primary_color") {
+                def_theme.primary_color = if color.trim().is_empty() { None } else { Some(color.trim().to_string()) };
+            }
+            if let Some(pb) = form_value(&form, "default_powered_by_text") {
+                def_theme.powered_by_text = if pb.trim().is_empty() { None } else { Some(pb.trim().to_string()) };
+            }
+            if let Some(ft) = form_value(&form, "default_footer_text") {
+                def_theme.footer_text = if ft.trim().is_empty() { None } else { Some(ft.trim().to_string()) };
+            }
+            let hide_pb = form_value(&form, "default_hide_powered_by").map(|v| v == "true" || v == "on").unwrap_or(false);
+            def_theme.hide_powered_by = hide_pb;
+            if let Some(css) = form_value(&form, "default_custom_css") {
+                def_theme.custom_css = if css.trim().is_empty() { None } else { Some(css.to_string()) };
+            }
+
+            settings.default_theme = Some(def_theme);
             let _ = store::save_runtime_settings(&settings).await;
             redirect_response("/admin/settings")
         }
@@ -422,6 +453,61 @@ async fn handle_parameterized_route(
                         new_secret
                     ));
                 }
+            }
+            if sub == "redirect-uris" && method == Method::POST {
+                let form = parse_form(body);
+                if let Ok(Some(mut client)) = store::get_client(id).await {
+                    if let Some(uris) = form_value(&form, "redirect_uris") {
+                        client.redirect_uris = uris.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+                        let _ = store::save_client(&client).await;
+                    }
+                }
+                return redirect_response(&format!("/admin/clients/{id}"));
+            }
+            if sub == "theme" && method == Method::POST {
+                let form = parse_form(body);
+                if let Ok(Some(mut client)) = store::get_client(id).await {
+                    let mut theme = client.theme.clone().unwrap_or_default();
+                    if let Some(an) = form_value(&form, "app_name") {
+                        theme.app_name = an.trim().to_string();
+                    }
+                    if let Some(tp) = form_value(&form, "theme_preset") {
+                        theme.theme_preset = if tp.is_empty() { None } else { Some(tp.to_string()) };
+                    }
+                    if let Some(logo) = form_value(&form, "logo_url") {
+                        theme.logo_url = if logo.trim().is_empty() { None } else { Some(logo.trim().to_string()) };
+                    }
+                    if let Some(color) = form_value(&form, "primary_color") {
+                        theme.primary_color = if color.trim().is_empty() { None } else { Some(color.trim().to_string()) };
+                    }
+                    if let Some(bg) = form_value(&form, "background_color") {
+                        theme.background_color = if bg.trim().is_empty() { None } else { Some(bg.trim().to_string()) };
+                    }
+                    if let Some(bg_img) = form_value(&form, "background_image_url") {
+                        theme.background_image_url = if bg_img.trim().is_empty() { None } else { Some(bg_img.trim().to_string()) };
+                    }
+                    if let Some(ff) = form_value(&form, "font_family") {
+                        theme.font_family = if ff.trim().is_empty() { None } else { Some(ff.trim().to_string()) };
+                    }
+                    if let Some(fu) = form_value(&form, "font_url") {
+                        theme.font_url = if fu.trim().is_empty() { None } else { Some(fu.trim().to_string()) };
+                    }
+                    if let Some(pb) = form_value(&form, "powered_by_text") {
+                        theme.powered_by_text = if pb.trim().is_empty() { None } else { Some(pb.trim().to_string()) };
+                    }
+                    if let Some(ft) = form_value(&form, "footer_text") {
+                        theme.footer_text = if ft.trim().is_empty() { None } else { Some(ft.trim().to_string()) };
+                    }
+                    let hide_pb = form_value(&form, "hide_powered_by").map(|v| v == "true" || v == "on").unwrap_or(false);
+                    theme.hide_powered_by = hide_pb;
+                    if let Some(css) = form_value(&form, "custom_css") {
+                        theme.custom_css = if css.trim().is_empty() { None } else { Some(css.to_string()) };
+                    }
+
+                    client.theme = Some(theme);
+                    let _ = store::save_client(&client).await;
+                }
+                return redirect_response(&format!("/admin/clients/{id}"));
             }
         } else {
             let id = rest;

@@ -6,13 +6,15 @@ Runs as a single wasmCloud WorkloadDeployment with [lattice-db](https://github.c
 
 ## Status
 
-**v1.7.0**
+**v1.8.0**
 
+- Dynamic theming engine with 6 trendy built-in presets (`taika-dark`, `taika-light`, `glassmorphic`, `cyberpunk`, `minimal-noir`, `neo-brutalist`) and complete white-labeling
 - Built-in Server-Side Rendered (SSR) Maud + HTMX Admin Panel embedded directly in `oidc-gateway` at `/admin`
 - Full OIDC/OAuth2 compliance (authorization code + PKCE, client credentials, device flow, refresh token rotation)
 - Security hardening: CSRF protection, refresh token absolute lifetime cap, account lockout, rate limiting, consent screen
 - GDPR: user data export (`GET /api/users/:id/export`) and erasure (`DELETE /api/users/:id`)
 - Backchannel logout (RFC 8613), RP-initiated logout (OIDC RP-Initiated Logout 1.0)
+- Dynamic theming, trendy modern presets, & full white-labeling: [THEMING.md](THEMING.md)
 - Multi-region design: [MULTI_REGION.md](MULTI_REGION.md)
 - WASI 0.3 / wasmCloud ≥ 2.7.0 Component Model async I/O compatibility (`wasip3 0.7`, `wit-bindgen 0.57`)
 

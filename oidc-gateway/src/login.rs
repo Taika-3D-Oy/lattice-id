@@ -50,26 +50,9 @@ pub fn acr_from_amr(amr: &[String]) -> Option<String> {
     }
 }
 
-/// Default theme used when no client theme is configured.
-fn default_theme() -> ClientTheme {
-    ClientTheme {
-        app_name: "Lattice-ID".to_string(),
-        logo_url: None,
-        primary_color: None,
-        background_color: None,
-    }
-}
-
 /// Resolve the theme for the current auth session's client.
 async fn resolve_theme(session_id: &str) -> ClientTheme {
-    let session = match store::get_auth_session(session_id).await {
-        Ok(Some(s)) => s,
-        _ => return default_theme(),
-    };
-    match store::get_client(&session.client_id).await {
-        Ok(Some(c)) => c.theme.unwrap_or_else(default_theme),
-        _ => default_theme(),
-    }
+    crate::theme::resolve_theme_for_session(session_id).await
 }
 
 async fn hinted_email(session_id: &str) -> Option<String> {
@@ -84,23 +67,18 @@ async fn hinted_email(session_id: &str) -> Option<String> {
 pub async fn login_page(session_id: &str, error: Option<&str>) -> Response<String> {
     let theme = resolve_theme(session_id).await;
     let hinted_email = hinted_email(session_id).await.unwrap_or_default();
-    let primary = util::sanitize_color(theme.primary_color.as_deref(), "#2563eb");
-    let primary_hover = darken_hex(&primary);
-    let bg = util::sanitize_color(theme.background_color.as_deref(), "#f8fafc");
     let app_name = util::html_escape(&theme.app_name);
-
-    let logo_html = match &theme.logo_url {
-        Some(url) if util::is_safe_url(url) => format!(
-            r#"<img src="{}" alt="{}" style="max-height:48px;margin-bottom:16px">"#,
-            util::html_escape(url),
-            app_name,
-        ),
-        _ => String::new(),
-    };
+    let head_tags = crate::theme::render_head_tags(&theme);
+    let css_vars = crate::theme::render_css_variables(&theme);
+    let logo_html = crate::theme::render_logo(&theme);
+    let footer_html = crate::theme::render_footer(
+        &theme,
+        Some(r#"<a href="/account" style="color:inherit;text-decoration:none">Manage your account</a>"#),
+    );
 
     let error_html = match error {
         Some(msg) => format!(
-            r#"<div style="color:#b91c1c;background:#fef2f2;border:1px solid #fecaca;padding:10px 14px;border-radius:6px;margin-bottom:16px;font-size:14px">{}</div>"#,
+            r#"<div class="error-banner">{}</div>"#,
             util::html_escape(msg)
         ),
         None => String::new(),
@@ -133,26 +111,29 @@ Continue with Google
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sign In — {app_name}</title>
+{head_tags}
 <style>
 *{{margin:0;padding:0;box-sizing:border-box}}
-body{{font-family:system-ui,-apple-system,sans-serif;background:{bg};min-height:100vh;display:flex;align-items:center;justify-content:center}}
-.card{{background:#fff;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,.1);padding:40px;width:100%;max-width:400px}}
-h1{{font-size:24px;font-weight:600;color:#0f172a;margin-bottom:8px}}
-.sub{{color:#64748b;font-size:14px;margin-bottom:24px}}
-label{{display:block;font-size:14px;font-weight:500;color:#334155;margin-bottom:6px}}
-input[type=email],input[type=password]{{width:100%;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px;font-size:15px;margin-bottom:16px;outline:none;transition:border .15s}}
-input:focus{{border-color:{primary};box-shadow:0 0 0 3px {primary}1a}}
-button,.passkey-btn{{width:100%;padding:12px;background:{primary};color:#fff;border:none;border-radius:8px;font-size:15px;font-weight:500;cursor:pointer;transition:background .15s}}
-button:hover,.passkey-btn:hover{{background:{primary_hover}}}
-.passkey-btn{{display:flex;align-items:center;justify-content:center;gap:8px;background:transparent;color:#334155;border:1px solid #cbd5e1}}
-.passkey-btn:hover{{background:#f1f5f9}}
-.divider{{display:flex;align-items:center;margin:20px 0;color:#94a3b8;font-size:13px}}
-.divider::before,.divider::after{{content:'';flex:1;border-bottom:1px solid #e2e8f0}}
+{css_vars}
+body{{font-family:var(--font-family);background:var(--bg);min-height:100vh;display:flex;align-items:center;justify-content:center;color:var(--text);padding:20px}}
+.card{{background:var(--card-bg);border:var(--card-border);box-shadow:var(--card-shadow);backdrop-filter:blur(var(--card-backdrop-blur));-webkit-backdrop-filter:blur(var(--card-backdrop-blur));border-radius:var(--radius);padding:40px;width:100%;max-width:420px}}
+h1{{font-size:24px;font-weight:700;color:var(--text);margin-bottom:6px}}
+.sub{{color:var(--text-muted);font-size:14px;margin-bottom:24px}}
+label{{display:block;font-size:13px;font-weight:600;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.04em}}
+input[type=email],input[type=password]{{width:100%;padding:12px 14px;border:1px solid var(--input-border);border-radius:calc(var(--radius) * 0.7);background:var(--input-bg);color:var(--input-text);font-size:15px;margin-bottom:16px;outline:none;transition:all .15s ease}}
+input:focus{{border-color:var(--primary);box-shadow:0 0 0 3px rgba(16,185,129,.25)}}
+button,.passkey-btn{{width:100%;padding:12px;background:var(--primary);color:var(--button-text);border:none;border-radius:calc(var(--radius) * 0.7);font-size:15px;font-weight:600;cursor:pointer;transition:all .15s ease}}
+button:hover,.passkey-btn:hover{{background:var(--primary-hover);transform:translateY(-1px)}}
+.passkey-btn{{display:flex;align-items:center;justify-content:center;gap:8px;background:transparent;color:var(--text);border:1px solid var(--input-border)}}
+.passkey-btn:hover{{background:rgba(255,255,255,.08)}}
+.divider{{display:flex;align-items:center;margin:20px 0;color:var(--text-muted);font-size:13px}}
+.divider::before,.divider::after{{content:'';flex:1;border-bottom:1px solid var(--input-border)}}
 .divider span{{padding:0 12px}}
-.google-btn{{display:flex;align-items:center;justify-content:center;gap:10px;width:100%;padding:11px;border:1px solid #cbd5e1;border-radius:8px;font-size:15px;font-weight:500;color:#334155;text-decoration:none;transition:background .15s;cursor:pointer}}
-.google-btn:hover{{background:#f1f5f9}}
-.footer{{text-align:center;margin-top:20px;font-size:12px;color:#94a3b8}}
-.passkey-error{{color:#b91c1c;font-size:13px;margin-top:8px;display:none}}
+.google-btn{{display:flex;align-items:center;justify-content:center;gap:10px;width:100%;padding:11px;border:1px solid var(--input-border);border-radius:calc(var(--radius) * 0.7);font-size:15px;font-weight:500;color:var(--text);background:var(--input-bg);text-decoration:none;transition:all .15s ease;cursor:pointer}}
+.google-btn:hover{{background:rgba(255,255,255,.08)}}
+.error-banner{{color:#ef4444;background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.3);padding:10px 14px;border-radius:calc(var(--radius) * 0.6);margin-bottom:16px;font-size:14px}}
+.footer{{text-align:center;margin-top:24px;font-size:13px;color:var(--text-muted)}}
+.passkey-error{{color:#ef4444;font-size:13px;margin-top:8px;display:none}}
 </style>
 </head>
 <body>
@@ -178,7 +159,7 @@ Sign in with passkey
 </button>
 <div class="passkey-error" id="passkey-error"></div>
 </div>
-<p class="footer"><a href="/account" style="color:#94a3b8;text-decoration:none">Manage your account</a> · Powered by Lattice-ID</p>
+{footer_html}
 </div>
 <script>
 (function(){{
@@ -263,14 +244,15 @@ if(f)f.addEventListener('submit',function(){{
 /// Render MFA challenge page (TOTP code input).
 pub async fn mfa_page(mfa_token: &str, session_id: &str, error: Option<&str>) -> Response<String> {
     let theme = resolve_theme(session_id).await;
-    let primary = util::sanitize_color(theme.primary_color.as_deref(), "#2563eb");
-    let primary_hover = darken_hex(&primary);
-    let bg = util::sanitize_color(theme.background_color.as_deref(), "#f8fafc");
     let app_name = util::html_escape(&theme.app_name);
+    let head_tags = crate::theme::render_head_tags(&theme);
+    let css_vars = crate::theme::render_css_variables(&theme);
+    let logo_html = crate::theme::render_logo(&theme);
+    let footer_html = crate::theme::render_footer(&theme, None);
 
     let error_html = match error {
         Some(msg) => format!(
-            r#"<div style="color:#b91c1c;background:#fef2f2;border:1px solid #fecaca;padding:10px 14px;border-radius:6px;margin-bottom:16px;font-size:14px">{}</div>"#,
+            r#"<div class="error-banner">{}</div>"#,
             util::html_escape(msg)
         ),
         None => String::new(),
@@ -283,23 +265,27 @@ pub async fn mfa_page(mfa_token: &str, session_id: &str, error: Option<&str>) ->
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Two-Factor Authentication — {app_name}</title>
+{head_tags}
 <style>
 *{{margin:0;padding:0;box-sizing:border-box}}
-body{{font-family:system-ui,-apple-system,sans-serif;background:{bg};min-height:100vh;display:flex;align-items:center;justify-content:center}}
-.card{{background:#fff;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,.1);padding:40px;width:100%;max-width:400px}}
-h1{{font-size:24px;font-weight:600;color:#0f172a;margin-bottom:8px}}
-.sub{{color:#64748b;font-size:14px;margin-bottom:24px}}
-label{{display:block;font-size:14px;font-weight:500;color:#334155;margin-bottom:6px}}
-input[type=text]{{width:100%;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px;font-size:20px;margin-bottom:16px;outline:none;text-align:center;letter-spacing:8px;font-family:monospace}}
-input:focus{{border-color:{primary};box-shadow:0 0 0 3px {primary}1a}}
-button{{width:100%;padding:12px;background:{primary};color:#fff;border:none;border-radius:8px;font-size:15px;font-weight:500;cursor:pointer;transition:background .15s}}
-button:hover{{background:{primary_hover}}}
-.hint{{color:#64748b;font-size:13px;margin-top:12px;text-align:center}}
-.footer{{text-align:center;margin-top:20px;font-size:12px;color:#94a3b8}}
+{css_vars}
+body{{font-family:var(--font-family);background:var(--bg);min-height:100vh;display:flex;align-items:center;justify-content:center;color:var(--text);padding:20px}}
+.card{{background:var(--card-bg);border:var(--card-border);box-shadow:var(--card-shadow);backdrop-filter:blur(var(--card-backdrop-blur));-webkit-backdrop-filter:blur(var(--card-backdrop-blur));border-radius:var(--radius);padding:40px;width:100%;max-width:420px}}
+h1{{font-size:24px;font-weight:700;color:var(--text);margin-bottom:6px}}
+.sub{{color:var(--text-muted);font-size:14px;margin-bottom:24px}}
+label{{display:block;font-size:13px;font-weight:600;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.04em}}
+input[type=text]{{width:100%;padding:12px 14px;border:1px solid var(--input-border);border-radius:calc(var(--radius) * 0.7);background:var(--input-bg);color:var(--input-text);font-size:20px;margin-bottom:16px;outline:none;text-align:center;letter-spacing:8px;font-family:monospace;transition:all .15s ease}}
+input:focus{{border-color:var(--primary);box-shadow:0 0 0 3px rgba(16,185,129,.25)}}
+button{{width:100%;padding:12px;background:var(--primary);color:var(--button-text);border:none;border-radius:calc(var(--radius) * 0.7);font-size:15px;font-weight:600;cursor:pointer;transition:all .15s ease}}
+button:hover{{background:var(--primary-hover);transform:translateY(-1px)}}
+.hint{{color:var(--text-muted);font-size:13px;margin-top:12px;text-align:center}}
+.error-banner{{color:#ef4444;background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.3);padding:10px 14px;border-radius:calc(var(--radius) * 0.6);margin-bottom:16px;font-size:14px}}
+.footer{{text-align:center;margin-top:24px;font-size:13px;color:var(--text-muted)}}
 </style>
 </head>
 <body>
 <div class="card">
+{logo_html}
 <h1>Two-Factor Authentication</h1>
 <p class="sub">Enter the code from your authenticator app</p>
 {error_html}
@@ -311,7 +297,7 @@ button:hover{{background:{primary_hover}}}
 <button type="submit" id="mfa-btn">Verify</button>
 </form>
 <p class="hint">You can also use a recovery code</p>
-<p class="footer">Powered by Lattice-ID</p>
+{footer_html}
 </div>
 <script>
 var f=document.getElementById('mfa-form');
@@ -875,14 +861,14 @@ mod tests {
 
     #[test]
     fn test_darken_hex() {
-        let darkened = darken_hex("#2563eb");
+        let darkened = crate::theme::darken_hex("#2563eb");
         assert!(darkened.starts_with('#'));
         assert_eq!(darkened.len(), 7);
     }
 
     #[test]
     fn test_darken_hex_invalid_fallback() {
-        let darkened = darken_hex("invalid");
+        let darkened = crate::theme::darken_hex("invalid");
         assert_eq!(darkened, "#1d4ed8");
     }
 
@@ -902,19 +888,6 @@ mod tests {
     }
 }
 
-/// Darken a hex color by ~15% for hover states.
-fn darken_hex(hex: &str) -> String {
-    let hex = hex.trim_start_matches('#');
-    if hex.len() != 6 {
-        return "#1d4ed8".to_string(); // fallback
-    }
-    let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(37);
-    let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(99);
-    let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(235);
-    let darken = |c: u8| (c as f32 * 0.85) as u8;
-    format!("#{:02x}{:02x}{:02x}", darken(r), darken(g), darken(b))
-}
-
 /// Render the consent page shown to users for third-party / prompt=consent flows.
 /// The page shows what scopes are requested and lets the user approve or deny.
 pub async fn consent_page(
@@ -923,8 +896,15 @@ pub async fn consent_page(
     client: &crate::store::OidcClient,
     user: &crate::store::User,
 ) -> Response<String> {
+    let settings = store::get_runtime_settings().await;
+    let theme = crate::theme::resolve_effective_theme(client.theme.clone(), &settings);
     let app_name = crate::util::html_escape(&client.name);
     let user_email = crate::util::html_escape(&user.email);
+    let head_tags = crate::theme::render_head_tags(&theme);
+    let css_vars = crate::theme::render_css_variables(&theme);
+    let logo_html = crate::theme::render_logo(&theme);
+    let footer_html = crate::theme::render_footer(&theme, None);
+
     let scope_list: Vec<&str> = auth_code
         .scope
         .split_whitespace()
@@ -939,7 +919,7 @@ pub async fn consent_page(
             "offline_access" => "Stay signed in (refresh tokens)",
             other      => other,
         };
-        format!(r#"<li style="padding:6px 0;border-bottom:1px solid #f1f5f9;color:#334155">{}</li>"#,
+        format!(r#"<li style="padding:8px 0;border-bottom:1px solid var(--input-border);color:var(--text)">{}</li>"#,
             crate::util::html_escape(desc))
     }).collect();
     let scopes_html = scope_descriptions.join("\n");
@@ -955,29 +935,32 @@ pub async fn consent_page(
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Authorise {app_name}</title>
+{head_tags}
 <style>
 *{{margin:0;padding:0;box-sizing:border-box}}
-body{{font-family:system-ui,-apple-system,sans-serif;background:#f8fafc;min-height:100vh;display:flex;align-items:center;justify-content:center}}
-.card{{background:#fff;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,.1);padding:40px;width:100%;max-width:440px}}
-h1{{font-size:22px;font-weight:600;color:#0f172a;margin-bottom:6px}}
-.sub{{color:#64748b;font-size:14px;margin-bottom:24px}}
-.client-name{{font-weight:600;color:#0f172a}}
-ul{{list-style:none;margin-bottom:24px;padding:0;border-top:1px solid #f1f5f9}}
+{css_vars}
+body{{font-family:var(--font-family);background:var(--bg);min-height:100vh;display:flex;align-items:center;justify-content:center;color:var(--text);padding:20px}}
+.card{{background:var(--card-bg);border:var(--card-border);box-shadow:var(--card-shadow);backdrop-filter:blur(var(--card-backdrop-blur));-webkit-backdrop-filter:blur(var(--card-backdrop-blur));border-radius:var(--radius);padding:40px;width:100%;max-width:440px}}
+h1{{font-size:22px;font-weight:700;color:var(--text);margin-bottom:6px}}
+.sub{{color:var(--text-muted);font-size:14px;margin-bottom:24px}}
+.client-name{{font-weight:700;color:var(--text)}}
+ul{{list-style:none;margin-bottom:24px;padding:0;border-top:1px solid var(--input-border)}}
 .actions{{display:flex;gap:12px}}
-button{{flex:1;padding:12px;border:none;border-radius:8px;font-size:15px;font-weight:500;cursor:pointer}}
-.btn-approve{{background:#2563eb;color:#fff}}
-.btn-approve:hover{{background:#1d4ed8}}
-.btn-deny{{background:#fff;color:#334155;border:1px solid #cbd5e1}}
-.btn-deny:hover{{background:#f1f5f9}}
-.footer{{text-align:center;margin-top:20px;font-size:12px;color:#94a3b8}}
+button{{flex:1;padding:12px;border:none;border-radius:calc(var(--radius) * 0.7);font-size:15px;font-weight:600;cursor:pointer;transition:all .15s ease}}
+.btn-approve{{background:var(--primary);color:var(--button-text)}}
+.btn-approve:hover{{background:var(--primary-hover);transform:translateY(-1px)}}
+.btn-deny{{background:transparent;color:var(--text);border:1px solid var(--input-border)}}
+.btn-deny:hover{{background:rgba(255,255,255,.08)}}
+.footer{{text-align:center;margin-top:24px;font-size:13px;color:var(--text-muted)}}
 </style>
 </head>
 <body>
 <div class="card">
+{logo_html}
 <h1>Authorise <span class="client-name">{app_name}</span></h1>
 <p class="sub">Signed in as {user_email}</p>
 
-<p style="font-size:14px;color:#334155;margin-bottom:12px"><strong>{app_name}</strong> is requesting access to:</p>
+<p style="font-size:14px;color:var(--text-muted);margin-bottom:12px"><strong>{app_name}</strong> is requesting access to:</p>
 <ul>
 {scopes_html}
 </ul>
@@ -992,7 +975,7 @@ button{{flex:1;padding:12px;border:none;border-radius:8px;font-size:15px;font-we
 </div>
 </form>
 
-<p class="footer">Powered by Lattice-ID</p>
+{footer_html}
 </div>
 </body>
 </html>"#,

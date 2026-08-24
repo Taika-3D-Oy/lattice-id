@@ -360,15 +360,66 @@ impl Default for OidcClient {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct ClientTheme {
+    #[serde(default)]
     pub app_name: String,
     #[serde(default)]
     pub logo_url: Option<String>,
     #[serde(default)]
+    pub logo_height: Option<String>,
+    #[serde(default)]
+    pub favicon_url: Option<String>,
+    #[serde(default)]
+    pub theme_preset: Option<String>,
+    #[serde(default)]
     pub primary_color: Option<String>,
     #[serde(default)]
+    pub primary_hover_color: Option<String>,
+    #[serde(default)]
     pub background_color: Option<String>,
+    #[serde(default)]
+    pub background_image_url: Option<String>,
+    #[serde(default)]
+    pub card_background: Option<String>,
+    #[serde(default)]
+    pub card_border: Option<String>,
+    #[serde(default)]
+    pub card_shadow: Option<String>,
+    #[serde(default)]
+    pub card_backdrop_blur: Option<String>,
+    #[serde(default)]
+    pub text_color: Option<String>,
+    #[serde(default)]
+    pub text_muted_color: Option<String>,
+    #[serde(default)]
+    pub input_background: Option<String>,
+    #[serde(default)]
+    pub input_border_color: Option<String>,
+    #[serde(default)]
+    pub input_text_color: Option<String>,
+    #[serde(default)]
+    pub button_text_color: Option<String>,
+    #[serde(default)]
+    pub border_radius: Option<String>,
+    #[serde(default)]
+    pub font_family: Option<String>,
+    #[serde(default)]
+    pub font_url: Option<String>,
+    #[serde(default)]
+    pub footer_text: Option<String>,
+    #[serde(default)]
+    pub powered_by_text: Option<String>,
+    #[serde(default)]
+    pub hide_powered_by: bool,
+    #[serde(default)]
+    pub terms_url: Option<String>,
+    #[serde(default)]
+    pub privacy_url: Option<String>,
+    #[serde(default)]
+    pub help_url: Option<String>,
+    #[serde(default)]
+    pub custom_css: Option<String>,
 }
 
 /// External identity provider configuration (Google, GitHub, any OIDC provider).
@@ -2312,10 +2363,12 @@ pub async fn list_hook_versions(hook_id: &str) -> Result<Vec<HookVersion>, Strin
 
 // ── Runtime settings ────────────────────────────────────────
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct RuntimeSettings {
     #[serde(default)]
     pub allow_registration: bool,
+    #[serde(default)]
+    pub default_theme: Option<ClientTheme>,
 }
 
 const SETTINGS_KEY: &str = "settings:global";
