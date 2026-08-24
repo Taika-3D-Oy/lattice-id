@@ -37,6 +37,36 @@ pub async fn handle_admin_route(
         return views::bootstrap::render_bootstrap_page(None);
     }
 
+    // ── Public Auth Routes (Login, MFA, Logout) ──
+    let path_no_query = path.split('?').next().unwrap_or(path);
+    let clean_path = path_no_query.trim_end_matches('/');
+    let p = if clean_path.is_empty() { "/admin" } else { clean_path };
+
+    if p == "/admin/login" {
+        if method == Method::POST {
+            return handle_admin_login(body).await;
+        }
+        if resolve_admin_session(headers).await.is_ok() {
+            return Response::builder()
+                .status(StatusCode::SEE_OTHER)
+                .header("location", "/admin")
+                .body(String::new())
+                .unwrap();
+        }
+        let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let params = parse_query(query);
+        let return_to = params.iter().find(|(k, _)| k == "return_to").map(|(_, v)| v.as_str()).unwrap_or("/admin");
+        return views::login::render_login_page(None, return_to);
+    }
+
+    if p == "/admin/login/mfa" && method == Method::POST {
+        return handle_admin_login_mfa(body).await;
+    }
+
+    if p == "/admin/logout" {
+        return handle_admin_logout(headers).await;
+    }
+
     // ── Authenticate Session ──
     let session = match resolve_admin_session(headers).await {
         Ok(s) => s,
@@ -592,8 +622,17 @@ async fn resolve_admin_session(headers: &HeaderMap) -> Result<AdminSession, Resp
         if let Some(cookie_hdr) = headers.get("cookie").and_then(|v| v.to_str().ok()) {
             for cookie in cookie_hdr.split(';') {
                 let cookie = cookie.trim();
-                if let Some(val) = cookie.strip_prefix("lid_account=").or_else(|| cookie.strip_prefix("lid_session=")) {
+                if let Some(val) = cookie.strip_prefix("lid_account=") {
                     if let Ok(Some(session_rec)) = store::get_account_session(val).await {
+                        if store::unix_now() <= session_rec.expires_at {
+                            if let Ok(Some(u)) = store::get_user(&session_rec.user_id).await {
+                                user_opt = Some(u);
+                                break;
+                            }
+                        }
+                    }
+                } else if let Some(val) = cookie.strip_prefix("lid_session=") {
+                    if let Ok(Some(session_rec)) = store::get_idp_session(val).await {
                         if store::unix_now() <= session_rec.expires_at {
                             if let Ok(Some(u)) = store::get_user(&session_rec.user_id).await {
                                 user_opt = Some(u);
@@ -611,7 +650,7 @@ async fn resolve_admin_session(headers: &HeaderMap) -> Result<AdminSession, Resp
         None => {
             return Err(Response::builder()
                 .status(StatusCode::SEE_OTHER)
-                .header("location", "/login?return_to=/admin")
+                .header("location", "/admin/login?return_to=/admin")
                 .body(String::new())
                 .unwrap());
         }
@@ -778,10 +817,185 @@ async fn handle_bootstrap_submit(body: &[u8]) -> Response<String> {
     };
     let _ = store::save_account_session(&session_token, &session_rec).await;
 
+    let secure = if crate::is_dev_mode() { "" } else { " Secure;" };
     Response::builder()
         .status(StatusCode::SEE_OTHER)
         .header("location", "/admin")
-        .header("set-cookie", format!("lid_account={session_token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800"))
+        .header("set-cookie", format!("lid_account={session_token}; Path=/; HttpOnly;{secure} SameSite=Lax; Max-Age=604800"))
+        .body(String::new())
+        .unwrap()
+}
+
+// ── Admin Login & Logout Handlers ──────────────────────────────
+
+async fn handle_admin_login(body: &[u8]) -> Response<String> {
+    let form = parse_form(body);
+    let email = form_value(&form, "email").unwrap_or("").trim();
+    let password = form_value(&form, "password").unwrap_or("");
+    let return_to = form_value(&form, "return_to").unwrap_or("/admin");
+    let return_target = if return_to.is_empty() { "/admin" } else { return_to };
+
+    if email.is_empty() || password.is_empty() {
+        return views::login::render_login_page(Some("Please enter both email and password."), return_target);
+    }
+
+    let user = match store::get_user_by_email(email).await {
+        Ok(Some(u)) => u,
+        _ => {
+            // Constant-time dummy check to prevent user enumeration
+            let _ = crate::service_client::verify_password(
+                password,
+                "$argon2id$v=19$m=65536,t=3,p=1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            ).await;
+            return views::login::render_login_page(Some("Invalid email or password."), return_target);
+        }
+    };
+
+    if user.status != "active" {
+        return views::login::render_login_page(Some("This account is not active. Please contact an administrator."), return_target);
+    }
+
+    // Check account lockout
+    if store::is_account_locked(&user.id).await.unwrap_or(false) {
+        return views::login::render_login_page(Some("Account temporarily locked due to repeated failed login attempts. Please try again later."), return_target);
+    }
+
+    // Verify password via password-hasher
+    match crate::service_client::verify_password(password, &user.password_hash).await {
+        Ok(true) => {}
+        _ => {
+            let _ = store::record_failed_login(&user.id).await;
+            let _ = store::log_audit("admin_login_failed", &user.id, &user.id, email).await;
+            return views::login::render_login_page(Some("Invalid email or password."), return_target);
+        }
+    }
+
+    // Check admin permissions
+    let is_super = user.superadmin;
+    let memberships = store::list_user_tenants(&user.id).await.unwrap_or_default();
+    let is_admin = is_super || memberships.iter().any(|m| m.role == "owner" || m.role == "admin");
+
+    if !is_admin {
+        return views::login::render_login_page(Some("Access denied: Administrator privileges required."), return_target);
+    }
+
+    // Check MFA
+    if user.totp_enabled {
+        let mfa_token = store::random_hex(32);
+        let pending = store::MfaPending {
+            user_id: user.id.clone(),
+            session_id: "admin".to_string(),
+            primary_amr: vec!["pwd".to_string()],
+            expires_at: store::unix_now() + 300,
+            remote_ip: "admin".to_string(),
+        };
+        let _ = store::save_mfa_pending(&mfa_token, &pending).await;
+        return views::login::render_mfa_prompt(&user.email, &mfa_token, return_target, None);
+    }
+
+    let _ = store::clear_login_attempts(&user.id).await;
+    let _ = store::log_audit("admin_login_success", &user.id, &user.id, &user.email).await;
+
+    // Create session token and set cookie
+    let session_token = store::random_hex(32);
+    let session_rec = AccountSession {
+        user_id: user.id.clone(),
+        created_at: store::unix_now(),
+        expires_at: store::unix_now() + 86400 * 7,
+        csrf_token: store::random_hex(24),
+    };
+    let _ = store::save_account_session(&session_token, &session_rec).await;
+
+    let secure = if crate::is_dev_mode() { "" } else { " Secure;" };
+    Response::builder()
+        .status(StatusCode::SEE_OTHER)
+        .header("location", return_target)
+        .header("set-cookie", format!("lid_account={session_token}; Path=/; HttpOnly;{secure} SameSite=Lax; Max-Age=604800"))
+        .body(String::new())
+        .unwrap()
+}
+
+async fn handle_admin_login_mfa(body: &[u8]) -> Response<String> {
+    let form = parse_form(body);
+    let mfa_token = form_value(&form, "mfa_token").unwrap_or("");
+    let code = form_value(&form, "code").unwrap_or("").trim();
+    let return_to = form_value(&form, "return_to").unwrap_or("/admin");
+    let return_target = if return_to.is_empty() { "/admin" } else { return_to };
+
+    let pending = match store::get_mfa_pending(mfa_token).await {
+        Ok(Some(p)) if store::unix_now() <= p.expires_at => p,
+        _ => {
+            return views::login::render_login_page(Some("MFA session expired. Please sign in again."), return_target);
+        }
+    };
+
+    let user = match store::get_user(&pending.user_id).await {
+        Ok(Some(u)) => u,
+        _ => return views::login::render_login_page(Some("User not found."), return_target),
+    };
+
+    // Verify TOTP or recovery code
+    let mut verified = false;
+    if let Some(ref secret) = user.totp_secret {
+        if crate::totp::verify_totp(secret, code) {
+            verified = true;
+        }
+    }
+
+    if !verified && !user.recovery_codes.is_empty() {
+        // Check recovery code
+        let normalized = code.trim().to_lowercase();
+        if user.recovery_codes.iter().any(|c| c.to_lowercase() == normalized) {
+            verified = true;
+            let _ = store::update_user_rmw(&user.id, |u| {
+                u.recovery_codes.retain(|c| c.to_lowercase() != normalized);
+                Ok(true)
+            }).await;
+        }
+    }
+
+    if !verified {
+        return views::login::render_mfa_prompt(&user.email, mfa_token, return_target, Some("Invalid authentication code. Please try again."));
+    }
+
+    let _ = store::delete_mfa_pending(mfa_token).await;
+    let _ = store::clear_login_attempts(&user.id).await;
+    let _ = store::log_audit("admin_login_mfa_success", &user.id, &user.id, &user.email).await;
+
+    // Create session token and set cookie
+    let session_token = store::random_hex(32);
+    let session_rec = AccountSession {
+        user_id: user.id.clone(),
+        created_at: store::unix_now(),
+        expires_at: store::unix_now() + 86400 * 7,
+        csrf_token: store::random_hex(24),
+    };
+    let _ = store::save_account_session(&session_token, &session_rec).await;
+
+    let secure = if crate::is_dev_mode() { "" } else { " Secure;" };
+    Response::builder()
+        .status(StatusCode::SEE_OTHER)
+        .header("location", return_target)
+        .header("set-cookie", format!("lid_account={session_token}; Path=/; HttpOnly;{secure} SameSite=Lax; Max-Age=604800"))
+        .body(String::new())
+        .unwrap()
+}
+
+async fn handle_admin_logout(headers: &HeaderMap) -> Response<String> {
+    if let Some(cookie_hdr) = headers.get("cookie").and_then(|v| v.to_str().ok()) {
+        for cookie in cookie_hdr.split(';') {
+            let cookie = cookie.trim();
+            if let Some(val) = cookie.strip_prefix("lid_account=") {
+                let _ = store::delete_account_session(val).await;
+            }
+        }
+    }
+
+    let secure = if crate::is_dev_mode() { "" } else { " Secure;" };
+    Response::builder()
+        .status(StatusCode::SEE_OTHER)
+        .header("location", "/admin/login")
+        .header("set-cookie", format!("lid_account=; Path=/; HttpOnly;{secure} SameSite=Lax; Max-Age=0"))
         .body(String::new())
         .unwrap()
 }

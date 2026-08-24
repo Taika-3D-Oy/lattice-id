@@ -430,6 +430,20 @@ async fn handle(
         // ── OIDC flow ───────────────────────────────────────
         (&Method::GET, "/authorize") => authorize::handle(query, &issuer, &parts.headers).await,
 
+        (&Method::GET, "/login") => {
+            let params = util::parse_query(query);
+            if let Some((_, session_id)) = params.iter().find(|(k, _)| k == "session_id") {
+                Ok(login::login_page(session_id, None).await)
+            } else {
+                let return_to = params.iter().find(|(k, _)| k == "return_to").map(|(_, v)| v.as_str()).unwrap_or("/admin");
+                Ok(Response::builder()
+                    .status(StatusCode::SEE_OTHER)
+                    .header("location", format!("/admin/login?return_to={return_to}"))
+                    .body(String::new())
+                    .unwrap())
+            }
+        }
+
         (&Method::POST, "/login") => {
             let body_bytes = read_body(body).await?;
             login::handle_login(&body_bytes, remote_ip).await

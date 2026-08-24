@@ -1,5 +1,6 @@
 pub mod bootstrap;
 pub mod dashboard;
+pub mod login;
 pub mod tenants;
 pub mod clients;
 pub mod users;

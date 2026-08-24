@@ -61,7 +61,7 @@ pub fn render_layout(
                     div class="user-avatar" title=(session.user.email) { (initial) }
                     span style="font-size:13px; font-weight:500;" { (user_name) }
 
-                    a href="/account/logout" class="topbar-btn" style="text-decoration:none;" { "Sign out" }
+                    a href="/admin/logout" class="topbar-btn" style="text-decoration:none;" { "Sign out" }
                 }
 
                 // ── Sidebar ──
