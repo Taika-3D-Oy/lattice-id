@@ -60,3 +60,36 @@ pub fn render_bootstrap_page(error: Option<&str>) -> Response<String> {
         .body(markup.into_string())
         .unwrap()
 }
+
+pub fn render_bootstrap_pending_page(email: &str) -> Response<String> {
+    let markup = html! {
+        (DOCTYPE)
+        html lang="en" {
+            head {
+                meta charset="utf-8";
+                meta name="viewport" content="width=device-width, initial-scale=1.0";
+                title { "Verification Required — Lattice-ID Admin" }
+                link rel="stylesheet" href="/admin/style.css";
+            }
+            body class="center-screen" {
+                div class="bootstrap-box" {
+                    h1 { "Check Your Inbox" }
+                    p { "Bootstrap initialization is almost complete. A verification link has been sent to:" }
+                    div class="msg-info" style="margin: 16px 0; font-weight: 600; text-align: center; word-break: break-all;" {
+                        (email)
+                    }
+                    p {
+                        "Please click the link in your email to verify your email address and activate your superadministrator account."
+                    }
+                }
+            }
+        }
+    };
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/html; charset=utf-8")
+        .body(markup.into_string())
+        .unwrap()
+}
+

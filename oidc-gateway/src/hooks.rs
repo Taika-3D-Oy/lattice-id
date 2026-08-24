@@ -274,18 +274,19 @@ pub async fn apply_outcome(user: &mut User, outcome: &HookOutcome) -> Result<(),
             )
             .await;
         }
-        // Superadmins must be active — skip email verification.
-        if sa && user.status != "active" {
+        // If email verification is NOT required, activate superadmin automatically
+        if sa && !crate::require_email_verification() && user.status != "active" {
             changed = true;
         }
     }
 
     if changed {
         let set_sa = outcome.set_superadmin;
+        let require_verification = crate::require_email_verification();
         store::update_user_rmw(&user.id, |u| {
             if let Some(sa) = set_sa {
                 u.superadmin = sa;
-                if sa && u.status != "active" {
+                if sa && !require_verification && u.status != "active" {
                     u.status = "active".to_string();
                 }
             }

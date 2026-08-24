@@ -735,13 +735,20 @@ async fn handle_bootstrap_submit(body: &[u8]) -> Response<String> {
         Err(e) => return views::bootstrap::render_bootstrap_page(Some(&format!("Hashing error: {e}"))),
     };
 
+    let require_verification = crate::require_email_verification();
+    let initial_status = if require_verification {
+        "pending"
+    } else {
+        "active"
+    };
+
     let user_id = format!("user_{}", &store::random_alphanumeric(16));
     let mut user = User {
         id: user_id.clone(),
         email: email.to_string(),
         name: name.to_string(),
         password_hash,
-        status: "active".to_string(),
+        status: initial_status.to_string(),
         created_at: store::unix_now(),
         superadmin: true,
         totp_secret: None,
@@ -804,10 +811,37 @@ async fn handle_bootstrap_submit(body: &[u8]) -> Response<String> {
         "bootstrap_completed",
         &user.id,
         &user.id,
-        &format!("Superadmin initialized: {}", user.email),
+        &format!("Superadmin initialized: {} (status={})", user.email, user.status),
     ).await;
 
-    // Create session token and set cookie
+    if require_verification {
+        let verify_token = store::random_hex(32);
+        let verify_inv = store::Invitation {
+            tenant_id: "system".to_string(),
+            email: user.email.clone(),
+            role: "verify_email".to_string(),
+            token: verify_token.clone(),
+            invited_by: "system".to_string(),
+            expires_at: store::unix_now() + 86400,
+        };
+        let _ = store::save_invitation(&verify_inv).await;
+        let _ = store::log_audit(
+            "email_verification_link_generated",
+            &user.id,
+            &user.id,
+            &store::hmac_email(&verify_token),
+        ).await;
+        if crate::is_dev_mode() {
+            crate::logger::info(
+                &format!("LID_VERIFY: {} {}", user.email, verify_token),
+                serde_json::json!({}),
+            );
+        }
+        crate::email::send_verification_email(&issuer, &user.email, &user.name, &verify_token).await;
+        return views::bootstrap::render_bootstrap_pending_page(&user.email);
+    }
+
+    // Create session token and set cookie (only when verification not required)
     let session_token = store::random_hex(32);
     let session_rec = AccountSession {
         user_id: user.id.clone(),

@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.1] - 2026-08-24
+
+### Added
+
+- **Bootstrap Email Verification**:
+  - Enforced verification token generation and confirmation email dispatch when `require_email_verification` is enabled on `/admin/bootstrap`.
+  - Added "Check Your Inbox" pending page to prevent unauthorized session creation during bootstrap.
+
+### Fixed
+
+- **Superadmin Activation Guard**:
+  - Prevented hooks from prematurely promoting unverified superadmin accounts to active status when email verification is required.
+- **AWS SES SigV4 Request Signing**:
+  - Fixed `signed_headers` order and payload hash canonicalization in `email-worker` to properly sign requests to the AWS SES v2 API.
+
 ## [1.7.0] - 2026-08-24
 
 ### Added
