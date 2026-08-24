@@ -228,18 +228,29 @@ pub async fn handle(
         acr_values = claims_request.acr_values.clone();
     }
 
-    // Validate client
-    let client = store::get_client(client_id)
-        .await?
-        .ok_or_else(|| format!("unknown client_id: {client_id}"))?;
+    // Validate client (auto-ensure lid-admin if requested)
+    let client = match store::get_client(client_id).await? {
+        Some(c) => c,
+        None if client_id == "lid-admin" => {
+            store::ensure_admin_client(issuer, false).await?;
+            store::get_client(client_id)
+                .await?
+                .ok_or_else(|| format!("unknown client_id: {client_id}"))?
+        }
+        None => return Err(format!("unknown client_id: {client_id}")),
+    };
 
-    // PKCE is required for public clients; optional for confidential clients
-    if client.client_secret.is_none() && code_challenge.is_none() {
+    // PKCE is required for public third-party clients; optional for confidential clients and first-party clients
+    if !client.first_party && client.client_secret.is_none() && code_challenge.is_none() {
         return Err("missing code_challenge (PKCE required for public clients)".into());
     }
 
     // Validate redirect_uri
-    if !client.redirect_uris.iter().any(|u| u == redirect_uri) {
+    let is_valid_redirect = client.redirect_uris.iter().any(|u| {
+        u == redirect_uri
+            || (client.first_party && (u == &format!("{issuer}{redirect_uri}") || redirect_uri.starts_with('/')))
+    });
+    if !is_valid_redirect {
         return Err("redirect_uri not registered for this client".into());
     }
 

@@ -2010,10 +2010,14 @@ pub async fn ensure_admin_client(issuer: &str, dev_mode: bool) -> Result<(), Str
     // configured issuer (e.g. after switching from :8000 to port 80).
     let existing_secret = get_client(admin_id).await?.and_then(|c| c.client_secret);
     let mut redirect_uris = vec![
+        format!("{issuer}"),
         format!("{issuer}/"),
         format!("{issuer}/callback"),
         format!("{issuer}/admin"),
         format!("{issuer}/admin/"),
+        "/".to_string(),
+        "/admin".to_string(),
+        "/admin/".to_string(),
     ];
 
     if dev_mode {
