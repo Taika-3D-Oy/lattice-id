@@ -6,13 +6,14 @@ Runs as a single wasmCloud WorkloadDeployment with [lattice-db](https://github.c
 
 ## Status
 
-**v1.3.0**
+**v1.6.1**
 
 - Full OIDC/OAuth2 compliance (authorization code + PKCE, client credentials, device flow, refresh token rotation)
 - Security hardening: CSRF protection, refresh token absolute lifetime cap, account lockout, rate limiting, consent screen
 - GDPR: user data export (`GET /api/users/:id/export`) and erasure (`DELETE /api/users/:id`)
 - Backchannel logout (RFC 8613), RP-initiated logout (OIDC RP-Initiated Logout 1.0)
 - Multi-region design: [MULTI_REGION.md](MULTI_REGION.md)
+- WASI 0.3 / wasmCloud ≥ 2.7.0 Component Model async I/O compatibility (`wasip3 0.7`, `wit-bindgen 0.57`)
 
 ## Workspace Layout
 
@@ -24,7 +25,8 @@ Runs as a single wasmCloud WorkloadDeployment with [lattice-db](https://github.c
 
 ## Prerequisites
 
-- Rust nightly with the `wasm32-wasip3` target
+- Rust stable (≥ 1.85) with `wasm32-wasip2` target (and `wasm32-unknown-unknown` for admin-ui)
+- Runtime: [wasmCloud](https://wasmcloud.com) ≥ 2.7.0, or [Wasmtime](https://wasmtime.dev) ≥ 47
 - `wash` (stock upstream wasmCloud CLI)
 - `kind`, `kubectl`, `helm` for local Kubernetes clusters
 - `docker` for the local OCI registry
@@ -33,7 +35,8 @@ Runs as a single wasmCloud WorkloadDeployment with [lattice-db](https://github.c
 - Access to [lattice-db](https://github.com/Taika-3D-Oy/lattice-db) OCI images on GHCR (default: `ghcr.io/taika-3d-oy/lattice-db/storage-service:latest`)
 
 ```bash
-rustup target add wasm32-wasip3
+rustup target add wasm32-wasip2
+rustup target add wasm32-unknown-unknown
 ```
 
 ## Local Development
@@ -86,7 +89,7 @@ bootstrap_hook: |
 ## Build And Check
 
 ```bash
-cargo build --workspace --target wasm32-wasip3
+cargo build --workspace --target wasm32-wasip2
 cargo test --workspace
 ```
 

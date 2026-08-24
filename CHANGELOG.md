@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] - 2026-08-24
+
+### Changed
+
+- **Stable Rust & WASI 0.3 Toolchain**:
+  - Upgraded workspace dependencies to `wasip3 0.7` and `wit-bindgen 0.57`.
+  - Updated toolchain documentation to stable Rust targeting `wasm32-wasip2`.
+  - Updated runtime requirements to Wasmtime ≥ 47 / wasmCloud ≥ 2.7.0.
+
+### Fixed
+
+- **TCP Co-Located Storage Client**:
+  - Added retry loop with exponential backoff for socket creation and `start_connect` in `try_ldb_tcp`.
+  - Replaced polling loops with blocking WASI stream reads.
+  - Adjusted TCP loopback handling and removed unnecessary messaging dependency from `oidc-gateway`.
+
 ## [1.6.0] - 2026-08-22
 
 ### Added
