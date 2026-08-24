@@ -28,7 +28,7 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-wasip2, wasm32-unknown-unknown
+          targets: wasm32-wasip2
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -69,26 +69,6 @@ jobs:
       - name: Build workspace (wasip2 release)
         run: cargo build --workspace --target wasm32-wasip2 --release
 
-      - name: Build admin-ui
-        run: |
-          # Install trunk for building the Leptos CSR frontend
-          cargo install trunk --locked
-          cd admin-ui && trunk build --release
-          cd host && cargo build --target wasm32-wasip2 --release
-
-      - name: Optimise admin-ui wasm
-        run: |
-          sudo apt-get install -y --no-install-recommends binaryen
-          for f in admin-ui/dist/*.wasm; do
-            wasm-opt \
-              --enable-bulk-memory \
-              --enable-sign-ext \
-              --enable-nontrapping-float-to-int \
-              --enable-mutable-globals \
-              --enable-reference-types \
-              -Oz -o "$f" "$f"
-          done
-
       - name: Push components to GHCR
         env:
           TAG: ${{ steps.tag.outputs.tag }}
@@ -102,10 +82,6 @@ jobs:
               "target/wasm32-wasip2/release/${wasm}.wasm:application/wasm"
           done
 
-          echo "==> Pushing admin-ui-host:${TAG}"
-          oras push "${IMAGE_PREFIX}/admin-ui-host:${TAG}" \
-            "admin-ui/host/target/wasm32-wasip2/release/admin_ui_host.wasm:application/wasm"
-
           # Also tag as latest
           if [[ "${TAG}" != "latest" ]]; then
             for comp in "${components[@]}"; do
@@ -113,8 +89,6 @@ jobs:
               oras push "${IMAGE_PREFIX}/${comp}:latest" \
                 "target/wasm32-wasip2/release/${wasm}.wasm:application/wasm"
             done
-            oras push "${IMAGE_PREFIX}/admin-ui-host:latest" \
-              "admin-ui/host/target/wasm32-wasip2/release/admin_ui_host.wasm:application/wasm"
           fi
 
       - name: Summary
@@ -124,6 +98,6 @@ jobs:
         run: |
           echo "## Published images" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          for comp in oidc-gateway password-hasher email-worker admin-ui-host; do
+          for comp in oidc-gateway password-hasher email-worker; do
             echo "- \`${IMAGE_PREFIX}/${comp}:${TAG}\`" >> "$GITHUB_STEP_SUMMARY"
           done

@@ -31,3 +31,4 @@ rhai = { version = "1", default-features = false, features = ["std"] }
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
 ciborium = { version = "0.2", default-features = false }
 futures = { version = "0.3", default-features = false, features = ["executor"] }
+maud = "0.26"

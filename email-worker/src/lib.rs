@@ -218,9 +218,10 @@ mod ses {
 
         // AWS SigV4 signing
         let payload_hash = hex_sha256(payload.as_bytes());
-        let canonical_headers =
-            format!("content-type:application/json\nhost:{host}\nx-amz-date:{amz_date}\n");
-        let signed_headers = "content-type;host;x-amz-date";
+        let canonical_headers = format!(
+            "content-type:application/json\nhost:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\n"
+        );
+        let signed_headers = "content-type;host;x-amz-content-sha256;x-amz-date";
         let canonical_request = format!(
             "POST\n/v2/email/outbound-emails\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
         );
@@ -306,20 +307,48 @@ mod ses {
         }
     }
 
-    fn hex_sha256(data: &[u8]) -> String {
+    pub fn hex_sha256(data: &[u8]) -> String {
         hex::encode(Sha256::digest(data))
     }
 
-    fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
+    pub fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
         let mut mac = HmacSha256::new_from_slice(key).expect("HMAC key");
         mac.update(data);
         mac.finalize().into_bytes().to_vec()
     }
 
-    fn derive_signing_key(secret: &str, datestamp: &str, region: &str, service: &str) -> Vec<u8> {
+    pub fn derive_signing_key(secret: &str, datestamp: &str, region: &str, service: &str) -> Vec<u8> {
         let k_date = hmac_sha256(format!("AWS4{secret}").as_bytes(), datestamp.as_bytes());
         let k_region = hmac_sha256(&k_date, region.as_bytes());
         let k_service = hmac_sha256(&k_region, service.as_bytes());
         hmac_sha256(&k_service, b"aws4_request")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ses;
+
+    #[test]
+    fn test_sigv4_derivation() {
+        let secret = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
+        let datestamp = "20130524";
+        let region = "us-east-1";
+        let service = "ses";
+
+        let key = ses::derive_signing_key(secret, datestamp, region, service);
+        assert!(!key.is_empty());
+        assert_eq!(key.len(), 32);
+    }
+
+    #[test]
+    fn test_sha256_hash() {
+        let data = b"{}";
+        let hash = ses::hex_sha256(data);
+        assert_eq!(
+            hash,
+            "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        );
+    }
+}
+

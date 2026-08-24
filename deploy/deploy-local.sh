@@ -100,16 +100,6 @@ build_and_push() {
     || die "Failed to pull ${LATTICE_DB_IMAGE} — is it a public GHCR package?"
   wash oci push --insecure "localhost:${REGISTRY_PORT}/lattice-db/storage-service:dev" \
     "${ldb_wasm}"
-
-  # admin-ui-host (separate crate, embeds admin-ui dist/ assets)
-  if [[ -d admin-ui/dist ]]; then
-    log "Building admin-ui-host"
-    (cd admin-ui/host && cargo build --target wasm32-wasip2 --release)
-    wash oci push --insecure "localhost:${REGISTRY_PORT}/lattice-id/admin-ui-host:dev" \
-      admin-ui/host/target/wasm32-wasip2/release/admin_ui_host.wasm
-  else
-    log "Skipping admin-ui-host (run 'cd admin-ui && trunk build --release' first)"
-  fi
 }
 
 # ── NATS data-plane pod (standalone JetStream for lattice-db + messaging) ──

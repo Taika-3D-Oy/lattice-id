@@ -83,12 +83,6 @@ if [[ "${1:-}" != "--no-build" ]]; then
     wash oci push --insecure "localhost:${REGISTRY_PORT}/lattice-id/${comp}:dev" \
       "target/wasm32-wasip3/release/${wasm}.wasm"
   done
-
-  # Build admin-ui-host (separate crate, embeds the admin-ui dist/ assets)
-  log "Building admin-ui-host"
-  (cd admin-ui/host && cargo build --target wasm32-wasip2 --release)
-  wash oci push --insecure "localhost:${REGISTRY_PORT}/lattice-id/admin-ui-host:dev" \
-    admin-ui/host/target/wasm32-wasip2/release/admin_ui_host.wasm
 fi
 
 # ── Deploy ───────────────────────────────────────────────────
@@ -137,12 +131,8 @@ echo "    SES region:          ${SES_REGION}"
 echo "    SES from:            ${SES_FROM_ADDRESS}"
 echo ""
 echo "  Next steps:"
-echo "    1. Start the admin UI:  cd admin-ui && trunk serve"
-echo "    2. Open http://localhost:8091"
-echo "    3. Click 'Register' — use ${SUPERADMIN_EMAIL}"
-echo "       (registration is open ONLY until the first superadmin registers)"
-echo "    4. Check your inbox for the verification email"
-echo "       (superadmin is auto-verified, so you can skip this)"
+echo "    1. Open Admin Panel: http://localhost:8000/admin"
+echo "    2. Bootstrap or login as superadmin (${SUPERADMIN_EMAIL})"
 echo "    5. Log in → you'll have full management access"
 echo ""
 echo "  Rebuild after code changes:"

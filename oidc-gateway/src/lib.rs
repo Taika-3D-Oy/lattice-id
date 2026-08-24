@@ -15,6 +15,7 @@ getrandom::register_custom_getrandom!(wasi_getrandom);
 
 mod abuse;
 mod account;
+pub mod admin;
 mod authorize;
 mod backchannel;
 mod device;
@@ -369,7 +370,7 @@ async fn handle(
     }
 
     if route_path == "/admin" || route_path.starts_with("/admin/") {
-        return Ok(serve_admin_asset(route_path));
+        return Ok(admin::handle_admin_route(&parts.method, route_path, &parts.headers, &body).await);
     }
 
     let query = full_path.split_once('?').map(|(_, q)| q).unwrap_or("");
@@ -1302,92 +1303,6 @@ code{background:#f1f5f9;padding:2px 6px;border-radius:6px}
         .header("content-type", "text/html; charset=utf-8")
         .body(html.to_string())
         .unwrap()
-}
-
-/// Serve admin UI assets from the `lattice-id:admin/assets` component.
-/// SPA fallback: any path that doesn't match a file gets index.html.
-fn serve_admin_asset(route_path: &str) -> Response<String> {
-    use bindings::lattice_id::admin::assets;
-
-    // Strip /admin prefix to get the asset path within the SPA.
-    let asset_path = route_path.strip_prefix("/admin").unwrap_or("");
-    let asset_path = asset_path.strip_prefix('/').unwrap_or(asset_path);
-
-    // Try the exact path first, then fall back to index.html (SPA routing).
-    let asset = if asset_path.is_empty() {
-        assets::get_asset("index.html")
-    } else {
-        assets::get_asset(asset_path).or_else(|| assets::get_asset("index.html"))
-    };
-
-    match asset {
-        Some(a) => {
-            // The HTTP layer uses Response<String> but WASI serializes it as
-            // raw bytes. For binary assets (wasm, images) we use unchecked
-            // conversion to preserve the exact bytes through the pipeline.
-            let body = if a.content_type.starts_with("text/")
-                || a.content_type.contains("javascript")
-                || a.content_type.contains("json")
-            {
-                String::from_utf8(a.data).unwrap_or_default()
-            } else {
-                // SAFETY: `Response<String>` is the crate-wide HTTP body type.
-                // For binary assets (wasm, images) the bytes are not valid UTF-8,
-                // but the wasip3 HTTP serializer converts the body via
-                // `String::into_bytes()` — it never inspects or reinterprets
-                // the bytes as a UTF-8 string.  No `String` methods are called
-                // on this value after construction; it flows directly into the
-                // WASI body encoder unchanged.
-                // TODO: migrate to `Response<Vec<u8>>` / `Response<Bytes>` to
-                // eliminate this formal unsoundness.
-                #[allow(unsafe_code)]
-                unsafe {
-                    String::from_utf8_unchecked(a.data)
-                }
-            };
-            // Cache static assets with content-addressed filenames aggressively.
-            // Trunk emits `basename-<16 lowercase hex chars>.ext`; match that
-            // precisely to avoid caching any file that merely contains a hyphen.
-            // Snippet files (snippets/**) are NOT content-hashed by Trunk and
-            // must not be cached indefinitely — they renumber across builds.
-            let is_hashed = !asset_path.starts_with("snippets/")
-                && (asset_path.ends_with(".js")
-                    || asset_path.ends_with(".wasm")
-                    || asset_path.ends_with(".css"))
-                && asset_path
-                    .rsplit_once('.')
-                    .and_then(|(stem, _)| stem.rsplit_once('-'))
-                    .map(|(_, hash)| {
-                        hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit())
-                    })
-                    .unwrap_or(false);
-            let cache = if is_hashed {
-                "public, max-age=31536000, immutable"
-            } else {
-                "no-cache"
-            };
-            Response::builder()
-                .status(StatusCode::OK)
-                .header("content-type", &a.content_type)
-                .header("cache-control", cache)
-                .body(body)
-                .unwrap()
-        }
-        None => {
-            // No admin-ui-host component linked — show a helpful message.
-            let html = r#"<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>Admin UI</title>
-<style>body{font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f8fafc;color:#0f172a}.card{max-width:480px;background:#fff;border-radius:12px;padding:32px;box-shadow:0 4px 12px rgba(0,0,0,.08)}h1{margin:0 0 12px}p{line-height:1.6;color:#475569}a{color:#2563eb}</style>
-</head><body><div class="card"><h1>Admin UI Not Available</h1>
-<p>The admin-ui-host component is not loaded. Add it to your workload deployment or run <code>trunk serve</code> in the admin-ui directory for development.</p>
-<p><a href="/">Back</a></p></div></body></html>"#;
-            Response::builder()
-                .status(StatusCode::NOT_IMPLEMENTED)
-                .header("content-type", "text/html; charset=utf-8")
-                .body(html.to_string())
-                .unwrap()
-        }
-    }
 }
 
 async fn readyz(_auth: Option<&str>) -> Result<Response<String>, String> {

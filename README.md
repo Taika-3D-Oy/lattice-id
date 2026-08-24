@@ -6,8 +6,9 @@ Runs as a single wasmCloud WorkloadDeployment with [lattice-db](https://github.c
 
 ## Status
 
-**v1.6.1**
+**v1.7.0**
 
+- Built-in Server-Side Rendered (SSR) Maud + HTMX Admin Panel embedded directly in `oidc-gateway` at `/admin`
 - Full OIDC/OAuth2 compliance (authorization code + PKCE, client credentials, device flow, refresh token rotation)
 - Security hardening: CSRF protection, refresh token absolute lifetime cap, account lockout, rate limiting, consent screen
 - GDPR: user data export (`GET /api/users/:id/export`) and erasure (`DELETE /api/users/:id`)
@@ -17,26 +18,22 @@ Runs as a single wasmCloud WorkloadDeployment with [lattice-db](https://github.c
 
 ## Workspace Layout
 
-- `oidc-gateway`: HTTP OIDC surface, management API, rate limiting, key management, region routing, and admin UI serving
+- `oidc-gateway`: HTTP OIDC surface, management API, rate limiting, key management, region routing, and server-side rendered (SSR) Maud + HTMX admin panel
 - `password-hasher`: Argon2id worker (SIMD-accelerated, imported via WIT)
 - `email-worker`: email delivery (log for dev, AWS SES for production, imported via WIT)
-- `admin-ui`: optional Leptos admin UI (builds separately with Trunk)
-- `admin-ui/host`: WASI component that embeds the admin UI dist and serves via the gateway
 
 ## Prerequisites
 
-- Rust stable (≥ 1.85) with `wasm32-wasip2` target (and `wasm32-unknown-unknown` for admin-ui)
+- Rust stable (≥ 1.85) with `wasm32-wasip2` target
 - Runtime: [wasmCloud](https://wasmcloud.com) ≥ 2.7.0, or [Wasmtime](https://wasmtime.dev) ≥ 47
 - `wash` (stock upstream wasmCloud CLI)
 - `kind`, `kubectl`, `helm` for local Kubernetes clusters
 - `docker` for the local OCI registry
 - `curl` and `python3` for integration tests
-- `trunk` if you want the admin UI
 - Access to [lattice-db](https://github.com/Taika-3D-Oy/lattice-db) OCI images on GHCR (default: `ghcr.io/taika-3d-oy/lattice-db/storage-service:latest`)
 
 ```bash
 rustup target add wasm32-wasip2
-rustup target add wasm32-unknown-unknown
 ```
 
 ## Local Development
@@ -92,8 +89,6 @@ bootstrap_hook: |
 cargo build --workspace --target wasm32-wasip2
 cargo test --workspace
 ```
-
-The `admin-ui` crate is excluded from the root workspace and builds separately.
 
 ## Integration Tests
 

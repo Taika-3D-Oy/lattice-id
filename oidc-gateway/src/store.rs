@@ -200,7 +200,7 @@ fn lockout_duration() -> u64 {
 
 // ── Data types ──────────────────────────────────────────────
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct User {
     pub id: String,
     pub email: String,
@@ -221,7 +221,7 @@ pub struct User {
 }
 
 /// A stored WebAuthn/passkey credential (ES256 / P-256).
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PasskeyCredential {
     /// Base64url-encoded credential ID.
     pub credential_id: String,
@@ -372,7 +372,7 @@ pub struct ClientTheme {
 }
 
 /// External identity provider configuration (Google, GitHub, any OIDC provider).
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct IdentityProvider {
     pub id: String,
     pub provider_type: String, // "google", "generic-oidc", etc.
@@ -398,7 +398,7 @@ pub struct SocialIdentity {
     pub linked_at: u64,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Tenant {
     pub id: String,
     pub name: String,
@@ -407,7 +407,7 @@ pub struct Tenant {
     pub created_at: u64,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Membership {
     pub tenant_id: String,
     pub user_id: String,
@@ -447,7 +447,7 @@ pub struct LoginAttempts {
     pub locked_until: u64,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AuditEvent {
     pub event_type: String,
     pub actor_id: String,
@@ -463,7 +463,7 @@ pub struct CacheEntry<T> {
 }
 
 /// A Rhai scripting hook — Auth0-style "Action" that runs at lifecycle points.
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Hook {
     pub id: String,
     pub name: String,
@@ -494,7 +494,7 @@ fn default_version() -> u32 {
 }
 
 /// Immutable snapshot of a hook version, stored for audit trail.
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct HookVersion {
     pub hook_id: String,
     pub version: u32,
@@ -1658,6 +1658,10 @@ pub async fn list_clients() -> Result<Vec<OidcClient>, String> {
         }
     }
     Ok(clients)
+}
+
+pub async fn delete_client(client_id: &str) -> Result<(), String> {
+    kv_delete(&clients_store(), &format!("client:{client_id}")).await
 }
 
 // ── Tenant operations ───────────────────────────────────────

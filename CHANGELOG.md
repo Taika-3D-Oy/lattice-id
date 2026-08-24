@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-08-24
+
+### Added
+
+- **Unified SSR Maud + HTMX Admin Panel**:
+  - Replaced the external client-side Leptos SPA (`admin-ui` and `admin-ui-host`) with a full server-side rendered (SSR) admin dashboard embedded directly in `oidc-gateway`.
+  - Implemented compile-time type-checked templates using `maud` with zero client runtime build dependencies (no Trunk, no npm, no wasm-opt required).
+  - Embedded standalone minified HTMX 2.0.4 runtime and comprehensive CSS design system directly into gateway memory with immutable cache headers.
+  - Complete support for all admin features: First-run Bootstrap Wizard, Dashboard & Metrics, Tenants & Memberships, OAuth2/OIDC Clients & Secret Rotation, Users & Passkey Credentials, Identity Providers, Rhai Hooks & Live Simulator, System Settings, Audit Log Explorer, and Account Management.
+
+### Removed
+
+- **Legacy Leptos Admin UI & Host Crate**:
+  - Removed `admin-ui/` directory, `admin-ui-host` crate, and `lattice-id:admin/assets` WIT dependency.
+  - Removed `admin-ui-host` from all Kubernetes WorkloadDeployment manifests (`deploy/workloaddeployment-*.yaml`) and GitHub Actions publish workflows.
+  - Eliminated WASI string proxying bottlenecks and SRI asset mismatch issues.
+
 ## [1.6.1] - 2026-08-24
 
 ### Changed

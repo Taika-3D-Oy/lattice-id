@@ -277,7 +277,7 @@ const tokens = await response.json();
 
 ### Rust/egui (Wasm) Frontend
 
-For Rust browser apps using egui, the PKCE flow is the same but using `ehttp` for the token exchange and `web-sys` for localStorage/crypto. See the `admin-ui` directory in this repo for a working Leptos example.
+For Rust browser apps using egui or WASM frameworks, the PKCE flow is the same using `ehttp` or `reqwest` for the token exchange and `web-sys` for localStorage/crypto.
 
 ## Step 4: Deployment
 

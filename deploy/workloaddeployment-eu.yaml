@@ -41,9 +41,6 @@ spec:
         - name: email-worker
           image: kind-registry:5000/lattice-id/email-worker:dev
           maxInvocations: 10
-        - name: admin-ui-host
-          image: kind-registry:5000/lattice-id/admin-ui-host:dev
-          maxInvocations: 100
       hostInterfaces:
         - namespace: wasi
           package: http

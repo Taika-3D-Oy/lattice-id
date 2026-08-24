@@ -50,10 +50,6 @@ spec:
           image: ghcr.io/taika-3d-oy/lattice-id/email-worker:latest
           imagePullPolicy: Always
           maxInvocations: 10
-        - name: admin-ui-host
-          image: ghcr.io/taika-3d-oy/lattice-id/admin-ui-host:latest
-          imagePullPolicy: Always
-          maxInvocations: 100
       hostInterfaces:
         - namespace: wasi
           package: http

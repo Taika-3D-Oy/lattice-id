@@ -4,14 +4,11 @@ members = [
     "oidc-gateway",
     "email-worker",
 ]
-exclude = [
-    "admin-ui",
-]
 resolver = "3"
 
 [workspace.package]
 edition = "2024"
-version = "1.6.1"
+version = "1.7.0"
 authors = ["Taika 3D Oy"]
 description = "NATS-native OIDC identity provider for wasmCloud"
 repository = "https://github.com/Taika-3D-Oy/lattice-id"

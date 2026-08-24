@@ -2,7 +2,6 @@ package lattice-id:oidc;
 
 world gateway {
     import lattice-id:crypto/password;
-    import lattice-id:admin/assets;
     import wasi:config/store@0.2.0-rc.1;
     import wasi:sockets/instance-network@0.2.2;
     import wasi:sockets/tcp-create-socket@0.2.2;

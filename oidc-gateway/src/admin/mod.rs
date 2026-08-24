@@ -1,0 +1,780 @@
+pub mod layout;
+pub mod static_assets;
+pub mod views;
+
+use http::{HeaderMap, Method, Response, StatusCode};
+use crate::admin::layout::AdminSession;
+use crate::store::{self, AccountSession, ClientTheme, Hook, HookVersion, IdentityProvider, Invitation, Membership, OidcClient, Tenant, User};
+use crate::util::{form_value, parse_form, parse_query};
+
+pub async fn handle_admin_route(
+    method: &Method,
+    path: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Response<String> {
+    // ── Static Assets (no auth required) ──
+    if path == "/admin/style.css" || path == "/admin/style.css/" {
+        return static_assets::serve_css();
+    }
+    if path == "/admin/htmx.min.js" || path == "/admin/htmx.min.js/" {
+        return static_assets::serve_htmx();
+    }
+
+    // ── Bootstrap Check ──
+    let has_admin = crate::hooks::has_superadmin().await;
+    if !has_admin {
+        if path == "/admin/bootstrap" && method == Method::POST {
+            return handle_bootstrap_submit(body).await;
+        }
+        return views::bootstrap::render_bootstrap_page(None);
+    }
+
+    if path == "/admin/bootstrap" {
+        if method == Method::POST {
+            return handle_bootstrap_submit(body).await;
+        }
+        return views::bootstrap::render_bootstrap_page(None);
+    }
+
+    // ── Authenticate Session ──
+    let session = match resolve_admin_session(headers).await {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+
+    // ── Route Dispatch ──
+    let path_no_query = path.split('?').next().unwrap_or(path);
+    let clean_path = path_no_query.trim_end_matches('/');
+    let p = if clean_path.is_empty() { "/admin" } else { clean_path };
+
+    match (method, p) {
+        // ── Dashboard ──
+        (&Method::GET, "/admin") => {
+            views::dashboard::render_dashboard(&session).await
+        }
+
+        // ── Tenant Switcher ──
+        (&Method::POST, "/admin/tenant/switch") => {
+            let form = parse_form(body);
+            let tenant_id = form_value(&form, "tenant_id").unwrap_or("");
+            Response::builder()
+                .status(StatusCode::SEE_OTHER)
+                .header("location", "/admin")
+                .header("HX-Redirect", "/admin")
+                .header("set-cookie", format!("lid_tenant={tenant_id}; Path=/admin; SameSite=Lax; HttpOnly"))
+                .body(String::new())
+                .unwrap()
+        }
+
+        // ── Tenants ──
+        (&Method::GET, "/admin/tenants") => {
+            views::tenants::render_tenants_page(&session).await
+        }
+        (&Method::GET, "/admin/tenants/modal/new") => {
+            html_response(views::tenants::render_new_tenant_modal().into_string())
+        }
+        (&Method::POST, "/admin/tenants") => {
+            let form = parse_form(body);
+            let display_name = form_value(&form, "display_name").unwrap_or("").trim();
+            let name = form_value(&form, "name").unwrap_or("").trim();
+            if display_name.is_empty() || name.is_empty() {
+                return error_response(StatusCode::BAD_REQUEST, "Missing required tenant fields");
+            }
+            let tenant_id = format!("tenant_{}", &store::random_alphanumeric(12));
+            let tenant = Tenant {
+                id: tenant_id.clone(),
+                name: name.to_string(),
+                display_name: display_name.to_string(),
+                status: "active".to_string(),
+                created_at: store::unix_now(),
+            };
+            if let Err(e) = store::create_tenant(&tenant).await {
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("Failed to save tenant: {e}"));
+            }
+            // Add creator as owner
+            let membership = Membership {
+                user_id: session.user.id.clone(),
+                tenant_id: tenant_id.clone(),
+                role: "owner".to_string(),
+                joined_at: store::unix_now(),
+            };
+            let _ = store::add_membership(&membership).await;
+            redirect_response("/admin/tenants")
+        }
+
+        // ── Clients ──
+        (&Method::GET, "/admin/clients") => {
+            views::clients::render_clients_page(&session).await
+        }
+        (&Method::GET, "/admin/clients/modal/new") => {
+            html_response(views::clients::render_new_client_modal().into_string())
+        }
+        (&Method::POST, "/admin/clients") => {
+            let form = parse_form(body);
+            let name = form_value(&form, "name").unwrap_or("").trim();
+            let client_type = form_value(&form, "client_type").unwrap_or("confidential");
+            let uris_raw = form_value(&form, "redirect_uris").unwrap_or("");
+            let logo_url = form_value(&form, "logo_url").filter(|s| !s.trim().is_empty()).map(|s| s.to_string());
+            let primary_color = form_value(&form, "primary_color").filter(|s| !s.trim().is_empty()).map(|s| s.to_string());
+            let background_color = form_value(&form, "background_color").filter(|s| !s.trim().is_empty()).map(|s| s.to_string());
+
+            if name.is_empty() {
+                return error_response(StatusCode::BAD_REQUEST, "Client name is required");
+            }
+
+            let redirect_uris: Vec<String> = uris_raw
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect();
+
+            let client_id = format!("client_{}", &store::random_alphanumeric(16));
+            let client_secret = if client_type == "confidential" {
+                Some(store::random_alphanumeric(32))
+            } else {
+                None
+            };
+
+            let theme = if logo_url.is_some() || primary_color.is_some() || background_color.is_some() {
+                Some(ClientTheme {
+                    app_name: name.to_string(),
+                    logo_url,
+                    primary_color,
+                    background_color,
+                })
+            } else {
+                None
+            };
+
+            let client = OidcClient {
+                client_id: client_id.clone(),
+                client_secret,
+                redirect_uris,
+                grant_types: vec!["authorization_code".to_string(), "refresh_token".to_string()],
+                name: name.to_string(),
+                theme,
+                ..Default::default()
+            };
+
+            if let Err(e) = store::save_client(&client).await {
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("Failed to save client: {e}"));
+            }
+            redirect_response(&format!("/admin/clients/{client_id}"))
+        }
+
+        // ── Users ──
+        (&Method::GET, "/admin/users") => {
+            views::users::render_users_page(&session).await
+        }
+        (&Method::GET, "/admin/users/search") => {
+            let query_str = path.split_once('?').map(|(_, qs)| qs).unwrap_or("");
+            let q = parse_query(query_str);
+            let query_term = form_value(&q, "q").map(|s| s.to_lowercase()).unwrap_or_default();
+            let all_users = store::list_users().await.unwrap_or_default();
+            let filtered: Vec<User> = if query_term.is_empty() {
+                all_users
+            } else {
+                all_users
+                    .into_iter()
+                    .filter(|u| u.email.to_lowercase().contains(&query_term) || u.name.to_lowercase().contains(&query_term))
+                    .collect()
+            };
+            html_response(views::users::render_users_table(&filtered).into_string())
+        }
+
+        // ── Identity Providers ──
+        (&Method::GET, "/admin/identity-providers") => {
+            views::idps::render_idps_page(&session).await
+        }
+        (&Method::GET, "/admin/identity-providers/modal/new") => {
+            html_response(views::idps::render_new_idp_modal().into_string())
+        }
+        (&Method::POST, "/admin/identity-providers") => {
+            let form = parse_form(body);
+            let provider_type = form_value(&form, "provider_type").unwrap_or("google").to_string();
+            let client_id = form_value(&form, "client_id").unwrap_or("").trim().to_string();
+            let client_secret = form_value(&form, "client_secret").unwrap_or("").trim().to_string();
+            let enabled = form_value(&form, "enabled").map(|v| v == "true" || v == "on").unwrap_or(false);
+
+            if client_id.is_empty() || client_secret.is_empty() {
+                return error_response(StatusCode::BAD_REQUEST, "Client ID and Client Secret required");
+            }
+
+            let id = format!("idp_{}", &store::random_alphanumeric(12));
+            let idp = IdentityProvider {
+                id,
+                provider_type,
+                client_id,
+                client_secret,
+                enabled,
+                discovery_url: None,
+                display_name: None,
+            };
+
+            if let Err(e) = store::save_identity_provider(&idp).await {
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("Failed to save IDP: {e}"));
+            }
+            redirect_response("/admin/identity-providers")
+        }
+
+        // ── Hooks ──
+        (&Method::GET, "/admin/hooks") => {
+            views::hooks::render_hooks_page(&session).await
+        }
+        (&Method::GET, "/admin/hooks/new") => {
+            views::hooks::render_hook_editor_page(&session, None, &[]).await
+        }
+        (&Method::POST, "/admin/hooks") => {
+            let form = parse_form(body);
+            let name = form_value(&form, "name").unwrap_or("").trim();
+            let trigger = form_value(&form, "trigger").unwrap_or("post-login");
+            let priority: i32 = form_value(&form, "priority").and_then(|p| p.parse().ok()).unwrap_or(100);
+            let enabled = form_value(&form, "enabled").map(|v| v == "true" || v == "on").unwrap_or(false);
+            let script = form_value(&form, "script").unwrap_or("");
+
+            if name.is_empty() || script.is_empty() {
+                return error_response(StatusCode::BAD_REQUEST, "Hook name and script cannot be empty");
+            }
+
+            let id = format!("hook_{}", &store::random_alphanumeric(12));
+            let hash = store::sha256_hex(script);
+            let now = store::unix_now();
+            let hook = Hook {
+                id: id.clone(),
+                name: name.to_string(),
+                trigger: trigger.to_string(),
+                script: script.to_string(),
+                enabled,
+                priority,
+                created_at: now,
+                version: 1,
+                script_hash: hash.clone(),
+                updated_by: session.user.id.clone(),
+                updated_at: now,
+            };
+
+            if let Err(e) = store::save_hook(&hook).await {
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("Failed to save hook: {e}"));
+            }
+
+            let version_snapshot = HookVersion {
+                hook_id: id.clone(),
+                version: 1,
+                name: hook.name.clone(),
+                trigger: hook.trigger.clone(),
+                script: hook.script.clone(),
+                script_hash: hash,
+                enabled: hook.enabled,
+                priority: hook.priority,
+                changed_by: session.user.email.clone(),
+                changed_at: now,
+            };
+            let _ = store::save_hook_version(&version_snapshot).await;
+
+            redirect_response(&format!("/admin/hooks/{id}"))
+        }
+
+        // ── Settings ──
+        (&Method::GET, "/admin/settings") => {
+            views::settings::render_settings_page(&session).await
+        }
+        (&Method::POST, "/admin/settings") => {
+            let form = parse_form(body);
+            let allow_reg = form_value(&form, "allow_registration").map(|v| v == "true" || v == "on").unwrap_or(false);
+            let mut settings = store::get_runtime_settings().await;
+            settings.allow_registration = allow_reg;
+            let _ = store::save_runtime_settings(&settings).await;
+            redirect_response("/admin/settings")
+        }
+
+        // ── Audit Log ──
+        (&Method::GET, "/admin/audit") => {
+            views::audit::render_audit_page(&session, None, None, None).await
+        }
+        (&Method::GET, "/admin/audit/table") => {
+            let query_str = path.split_once('?').map(|(_, qs)| qs).unwrap_or("");
+            let q = parse_query(query_str);
+            let event_type = form_value(&q, "event_type").filter(|s| !s.is_empty());
+            let actor_id = form_value(&q, "actor_id").filter(|s| !s.is_empty());
+            let target_id = form_value(&q, "target_id").filter(|s| !s.is_empty());
+            let events = store::list_audit_events(actor_id, target_id, event_type, None, None, 100)
+                .await
+                .unwrap_or_default();
+            html_response(views::audit::render_audit_table(&events).into_string())
+        }
+
+        // ── My Account ──
+        (&Method::GET, "/admin/account") => {
+            views::account::render_account_page(&session).await
+        }
+
+        // ── Parameterized Route Handling ──
+        _ => handle_parameterized_route(method, p, headers, body, &session).await,
+    }
+}
+
+async fn handle_parameterized_route(
+    method: &Method,
+    path: &str,
+    _headers: &HeaderMap,
+    body: &[u8],
+    session: &AdminSession,
+) -> Response<String> {
+    // ── Single Tenant Detail & Subroutes ──
+    if let Some(rest) = path.strip_prefix("/admin/tenants/") {
+        if let Some((id, sub)) = rest.split_once('/') {
+            // e.g. /admin/tenants/{id}/invite
+            if sub == "invite" && method == Method::POST {
+                let form = parse_form(body);
+                let email = form_value(&form, "email").unwrap_or("").trim();
+                let role = form_value(&form, "role").unwrap_or("member");
+                if let Ok(Some(target_user)) = store::get_user_by_email(email).await {
+                    let m = Membership {
+                        tenant_id: id.to_string(),
+                        user_id: target_user.id.clone(),
+                        role: role.to_string(),
+                        joined_at: store::unix_now(),
+                    };
+                    let _ = store::add_membership(&m).await;
+                }
+                let memberships = store::list_tenant_members(id).await.unwrap_or_default();
+                let mut members = Vec::new();
+                for m in memberships {
+                    if let Ok(Some(u)) = store::get_user(&m.user_id).await {
+                        members.push((m, u));
+                    }
+                }
+                return html_response(views::tenants::render_members_table(id, &members).into_string());
+            }
+            // e.g. /admin/tenants/{id}/members/{userId}
+            if let Some(user_id) = sub.strip_prefix("members/") {
+                if method == Method::DELETE {
+                    let _ = store::remove_membership(id, user_id).await;
+                    return Response::builder().status(StatusCode::OK).body(String::new()).unwrap();
+                }
+            }
+        } else {
+            // /admin/tenants/{id}
+            let id = rest;
+            if method == Method::GET {
+                if let Ok(Some(tenant)) = store::get_tenant(id).await {
+                    let memberships = store::list_tenant_members(id).await.unwrap_or_default();
+                    let mut members = Vec::new();
+                    for m in memberships {
+                        if let Ok(Some(u)) = store::get_user(&m.user_id).await {
+                            members.push((m, u));
+                        }
+                    }
+                    return views::tenants::render_tenant_detail_page(session, &tenant, &members).await;
+                }
+            } else if method == Method::DELETE {
+                let _ = store::delete_tenant(id).await;
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header("HX-Redirect", "/admin/tenants")
+                    .body(String::new())
+                    .unwrap();
+            }
+        }
+    }
+
+    // ── Single Client Detail & Subroutes ──
+    if let Some(rest) = path.strip_prefix("/admin/clients/") {
+        if let Some((id, sub)) = rest.split_once('/') {
+            if sub == "rotate-secret" && method == Method::POST {
+                if let Ok(Some(mut client)) = store::get_client(id).await {
+                    let new_secret = store::random_alphanumeric(32);
+                    client.client_secret = Some(new_secret.clone());
+                    let _ = store::save_client(&client).await;
+                    return html_response(format!(
+                        r#"<div class="secret-box"><span class="copy-chip" onclick="copyToClipboard(this, this.innerText)">{}</span></div>"#,
+                        new_secret
+                    ));
+                }
+            }
+        } else {
+            let id = rest;
+            if method == Method::GET {
+                if let Ok(Some(client)) = store::get_client(id).await {
+                    return views::clients::render_client_detail_page(session, &client).await;
+                }
+            } else if method == Method::POST {
+                let form = parse_form(body);
+                if let Ok(Some(mut client)) = store::get_client(id).await {
+                    if let Some(name) = form_value(&form, "name") {
+                        client.name = name.trim().to_string();
+                    }
+                    if let Some(uris) = form_value(&form, "redirect_uris") {
+                        client.redirect_uris = uris.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+                    }
+                    let _ = store::save_client(&client).await;
+                    return redirect_response(&format!("/admin/clients/{id}"));
+                }
+            } else if method == Method::DELETE {
+                let _ = store::delete_client(id).await;
+                return Response::builder().status(StatusCode::OK).body(String::new()).unwrap();
+            }
+        }
+    }
+
+    // ── Single User Detail & Subroutes ──
+    if let Some(rest) = path.strip_prefix("/admin/users/") {
+        if let Some((id, sub)) = rest.split_once('/') {
+            if sub == "password-reset" && method == Method::POST {
+                if let Ok(Some(user)) = store::get_user(id).await {
+                    let reset_token = store::random_hex(32);
+                    let inv = Invitation {
+                        tenant_id: String::new(),
+                        email: user.email.clone(),
+                        role: "password_reset".to_string(),
+                        token: reset_token.clone(),
+                        invited_by: session.user.id.clone(),
+                        expires_at: store::unix_now() + 3600,
+                    };
+                    let _ = store::save_invitation(&inv).await;
+                    crate::email::send_password_reset_email(
+                        &crate::get_issuer(),
+                        &user.email,
+                        &user.name,
+                        &reset_token,
+                    ).await;
+                }
+                return redirect_response(&format!("/admin/users/{id}"));
+            }
+            if sub == "disable-mfa" && method == Method::POST {
+                if let Ok(Some(mut user)) = store::get_user(id).await {
+                    user.totp_enabled = false;
+                    user.totp_secret = None;
+                    let _ = store::update_user(&user).await;
+                }
+                return redirect_response(&format!("/admin/users/{id}"));
+            }
+            if let Some(cred_id) = sub.strip_prefix("passkeys/") {
+                if method == Method::DELETE {
+                    if let Ok(Some(mut user)) = store::get_user(id).await {
+                        user.passkey_credentials.retain(|p| p.credential_id != cred_id);
+                        let _ = store::update_user(&user).await;
+                        let _ = store::unindex_passkey_credential(cred_id).await;
+                    }
+                    return Response::builder().status(StatusCode::OK).body(String::new()).unwrap();
+                }
+            }
+        } else {
+            let id = rest;
+            if method == Method::GET {
+                if let Ok(Some(user)) = store::get_user(id).await {
+                    let passkeys = user.passkey_credentials.clone();
+                    return views::users::render_user_detail_page(session, &user, &passkeys).await;
+                }
+            } else if method == Method::DELETE {
+                let _ = store::delete_user(id).await;
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header("HX-Redirect", "/admin/users")
+                    .body(String::new())
+                    .unwrap();
+            }
+        }
+    }
+
+    // ── Identity Provider Subroutes ──
+    if let Some(id) = path.strip_prefix("/admin/identity-providers/") {
+        if method == Method::DELETE {
+            let _ = store::delete_identity_provider(id).await;
+            return Response::builder().status(StatusCode::OK).body(String::new()).unwrap();
+        }
+    }
+
+    // ── Single Hook Detail & Subroutes ──
+    if let Some(rest) = path.strip_prefix("/admin/hooks/") {
+        if let Some((id, sub)) = rest.split_once('/') {
+            if sub == "test" && method == Method::POST {
+                if let Ok(Some(hook)) = store::get_hook(id).await {
+                    match crate::hooks::test_hook(&hook.script, &hook.trigger) {
+                        Ok(outcome) => {
+                            let text = format!("Outcome: {:?}\nLogs: {:?}", outcome, outcome.log_messages);
+                            return html_response(views::hooks::render_test_result(&text, true).into_string());
+                        }
+                        Err(e) => {
+                            return html_response(views::hooks::render_test_result(&e, false).into_string());
+                        }
+                    }
+                }
+            }
+        } else {
+            let id = rest;
+            if method == Method::GET {
+                if let Ok(Some(hook)) = store::get_hook(id).await {
+                    let versions = store::list_hook_versions(id).await.unwrap_or_default();
+                    return views::hooks::render_hook_editor_page(session, Some(&hook), &versions).await;
+                }
+            } else if method == Method::POST {
+                let form = parse_form(body);
+                if let Ok(Some(mut hook)) = store::get_hook(id).await {
+                    let name = form_value(&form, "name").unwrap_or(&hook.name).trim().to_string();
+                    let trigger = form_value(&form, "trigger").unwrap_or(&hook.trigger).to_string();
+                    let priority: i32 = form_value(&form, "priority").and_then(|p| p.parse().ok()).unwrap_or(hook.priority);
+                    let enabled = form_value(&form, "enabled").map(|v| v == "true" || v == "on").unwrap_or(false);
+                    let script = form_value(&form, "script").unwrap_or(&hook.script).to_string();
+
+                    let now = store::unix_now();
+                    // Save previous version
+                    let prev_version = HookVersion {
+                        hook_id: hook.id.clone(),
+                        version: hook.version,
+                        name: hook.name.clone(),
+                        trigger: hook.trigger.clone(),
+                        script: hook.script.clone(),
+                        script_hash: hook.script_hash.clone(),
+                        enabled: hook.enabled,
+                        priority: hook.priority,
+                        changed_by: hook.updated_by.clone(),
+                        changed_at: hook.updated_at,
+                    };
+                    let _ = store::save_hook_version(&prev_version).await;
+
+                    hook.name = name;
+                    hook.trigger = trigger;
+                    hook.priority = priority;
+                    hook.enabled = enabled;
+                    hook.script_hash = store::sha256_hex(&script);
+                    hook.script = script;
+                    hook.version += 1;
+                    hook.updated_by = session.user.id.clone();
+                    hook.updated_at = now;
+
+                    let _ = store::save_hook(&hook).await;
+                    return redirect_response(&format!("/admin/hooks/{id}"));
+                }
+            } else if method == Method::DELETE {
+                let _ = store::delete_hook(id).await;
+                return Response::builder().status(StatusCode::OK).body(String::new()).unwrap();
+            }
+        }
+    }
+
+    // ── My Account Passkey Deletion ──
+    if let Some(cred_id) = path.strip_prefix("/admin/account/passkeys/") {
+        if method == Method::DELETE {
+            if let Ok(Some(mut user)) = store::get_user(&session.user.id).await {
+                user.passkey_credentials.retain(|p| p.credential_id != cred_id);
+                let _ = store::update_user(&user).await;
+                let _ = store::unindex_passkey_credential(cred_id).await;
+            }
+            return Response::builder().status(StatusCode::OK).body(String::new()).unwrap();
+        }
+    }
+
+    error_response(StatusCode::NOT_FOUND, "Admin route not found")
+}
+
+// ── Session Resolver ───────────────────────────────────────────
+
+async fn resolve_admin_session(headers: &HeaderMap) -> Result<AdminSession, Response<String>> {
+    let mut user_opt: Option<User> = None;
+
+    // Check Authorization: Bearer <jwt>
+    if let Some(auth_hdr) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
+        if let Some(token) = auth_hdr.strip_prefix("Bearer ").or_else(|| auth_hdr.strip_prefix("bearer ")) {
+            if let Ok(claims) = crate::service_client::verify_token_scoped(token, Some(&crate::get_issuer()), None, Some("access")).await {
+                if let Some(sub) = claims.get("sub").and_then(|v| v.as_str()) {
+                    if let Ok(Some(u)) = store::get_user(sub).await {
+                        user_opt = Some(u);
+                    }
+                }
+            }
+        }
+    }
+
+    // Check Cookies (lid_account or lid_session)
+    if user_opt.is_none() {
+        if let Some(cookie_hdr) = headers.get("cookie").and_then(|v| v.to_str().ok()) {
+            for cookie in cookie_hdr.split(';') {
+                let cookie = cookie.trim();
+                if let Some(val) = cookie.strip_prefix("lid_account=").or_else(|| cookie.strip_prefix("lid_session=")) {
+                    if let Ok(Some(session_rec)) = store::get_account_session(val).await {
+                        if store::unix_now() <= session_rec.expires_at {
+                            if let Ok(Some(u)) = store::get_user(&session_rec.user_id).await {
+                                user_opt = Some(u);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let user = match user_opt {
+        Some(u) => u,
+        None => {
+            return Err(Response::builder()
+                .status(StatusCode::SEE_OTHER)
+                .header("location", "/login?return_to=/admin")
+                .body(String::new())
+                .unwrap());
+        }
+    };
+
+    let is_super = user.superadmin;
+    let memberships = store::list_user_tenants(&user.id).await.unwrap_or_default();
+    let is_admin = is_super || memberships.iter().any(|m| m.role == "owner" || m.role == "admin");
+
+    if !is_admin {
+        return Err(error_response(
+            StatusCode::FORBIDDEN,
+            "Access denied: administrator privileges required.",
+        ));
+    }
+
+    // Resolve tenant list
+    let mut tenants = Vec::new();
+    if is_super {
+        tenants = store::list_tenants().await.unwrap_or_default();
+    } else {
+        for m in &memberships {
+            if let Ok(Some(t)) = store::get_tenant(&m.tenant_id).await {
+                tenants.push(t);
+            }
+        }
+    }
+
+    // Resolve current active tenant from cookie or first available
+    let mut current_tenant = None;
+    if let Some(cookie_hdr) = headers.get("cookie").and_then(|v| v.to_str().ok()) {
+        for cookie in cookie_hdr.split(';') {
+            let cookie = cookie.trim();
+            if let Some(tid) = cookie.strip_prefix("lid_tenant=") {
+                current_tenant = tenants.iter().find(|t| t.id == tid).cloned();
+                break;
+            }
+        }
+    }
+    if current_tenant.is_none() {
+        current_tenant = tenants.first().cloned();
+    }
+
+    Ok(AdminSession {
+        user,
+        is_superadmin: is_super,
+        current_tenant,
+        tenants,
+        csrf_token: store::random_alphanumeric(16),
+    })
+}
+
+// ── Bootstrap Handler ──────────────────────────────────────────
+
+async fn handle_bootstrap_submit(body: &[u8]) -> Response<String> {
+    let form = parse_form(body);
+    let email = form_value(&form, "email").unwrap_or("").trim();
+    let password = form_value(&form, "password").unwrap_or("");
+    let name = form_value(&form, "name").unwrap_or("").trim();
+    let org_name = form_value(&form, "org_name").unwrap_or("").trim();
+
+    if email.is_empty() || password.len() < 8 || name.is_empty() || org_name.is_empty() {
+        return views::bootstrap::render_bootstrap_page(Some(
+            "Please complete all fields. Password must be at least 8 characters.",
+        ));
+    }
+
+    let password_hash = match crate::service_client::hash_password(password).await {
+        Ok(h) => h,
+        Err(e) => return views::bootstrap::render_bootstrap_page(Some(&format!("Hashing error: {e}"))),
+    };
+
+    let user_id = format!("user_{}", &store::random_alphanumeric(16));
+    let user = User {
+        id: user_id.clone(),
+        email: email.to_string(),
+        name: name.to_string(),
+        password_hash,
+        status: "active".to_string(),
+        created_at: store::unix_now(),
+        superadmin: true,
+        totp_secret: None,
+        totp_enabled: false,
+        recovery_codes: Vec::new(),
+        passkey_credentials: Vec::new(),
+    };
+
+    if let Err(e) = store::create_user(&user).await {
+        return views::bootstrap::render_bootstrap_page(Some(&format!("Failed to save user: {e}")));
+    }
+
+    let _ = store::set_superadmin_flag(true).await;
+
+    // Create Initial Organization
+    let tenant_id = format!("tenant_{}", &store::random_alphanumeric(12));
+    let tenant_slug = org_name
+        .to_lowercase()
+        .replace(' ', "-")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect::<String>();
+    let tenant = Tenant {
+        id: tenant_id.clone(),
+        name: if tenant_slug.is_empty() { "default".to_string() } else { tenant_slug },
+        display_name: org_name.to_string(),
+        status: "active".to_string(),
+        created_at: store::unix_now(),
+    };
+    let _ = store::create_tenant(&tenant).await;
+
+    let membership = Membership {
+        tenant_id: tenant_id.clone(),
+        user_id: user.id.clone(),
+        role: "owner".to_string(),
+        joined_at: store::unix_now(),
+    };
+    let _ = store::add_membership(&membership).await;
+
+    // Create session token and set cookie
+    let session_token = store::random_hex(32);
+    let session_rec = AccountSession {
+        user_id: user.id.clone(),
+        created_at: store::unix_now(),
+        expires_at: store::unix_now() + 86400 * 7,
+        csrf_token: store::random_hex(24),
+    };
+    let _ = store::save_account_session(&session_token, &session_rec).await;
+
+    Response::builder()
+        .status(StatusCode::SEE_OTHER)
+        .header("location", "/admin")
+        .header("set-cookie", format!("lid_account={session_token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800"))
+        .body(String::new())
+        .unwrap()
+}
+
+// ── Helpers ───────────────────────────────────────────────────
+
+fn html_response(html: String) -> Response<String> {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/html; charset=utf-8")
+        .body(html)
+        .unwrap()
+}
+
+fn redirect_response(location: &str) -> Response<String> {
+    Response::builder()
+        .status(StatusCode::SEE_OTHER)
+        .header("location", location)
+        .header("HX-Redirect", location)
+        .body(String::new())
+        .unwrap()
+}
+
+fn error_response(status: StatusCode, message: &str) -> Response<String> {
+    Response::builder()
+        .status(status)
+        .header("content-type", "text/html; charset=utf-8")
+        .body(format!(
+            r#"<div class="test-err" style="padding: 16px; margin: 16px; border-radius: 8px;"><strong>Error ({}):</strong> {}</div>"#,
+            status.as_u16(),
+            message
+        ))
+        .unwrap()
+}
