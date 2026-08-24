@@ -1183,11 +1183,17 @@ async fn handle_logout(
         let _ = store::log_audit("logout", sub, sub, "").await;
     }
 
-    // Delete the server-side IdP browser session so the lid_session cookie
-    // cannot be reused for prompt=none after logout, even if the browser
-    // ignores the Max-Age=0 clear directive.
-    if let Some(idp_token) = account::extract_idp_session_token(headers) {
-        let _ = store::delete_idp_session(&idp_token).await;
+    // Delete server-side IdP and account sessions
+    if let Some(cookie_hdr) = headers.get("cookie").and_then(|v| v.to_str().ok()) {
+        for cookie in cookie_hdr.split(';') {
+            let cookie = cookie.trim();
+            if let Some(val) = cookie.strip_prefix("lid_account=") {
+                let _ = store::delete_account_session(val).await;
+            }
+            if let Some(val) = cookie.strip_prefix("lid_session=") {
+                let _ = store::delete_idp_session(val).await;
+            }
+        }
     }
 
     // Redirect to post_logout_redirect_uri if provided, otherwise show confirmation.
@@ -1214,13 +1220,15 @@ async fn handle_logout(
                 }
                 _ => uri.to_string(),
             };
-            Ok(Response::builder()
+            let mut resp = Response::builder()
                 .status(StatusCode::FOUND)
                 .header("location", &location)
-                .header("cache-control", "no-store")
-                .header("set-cookie", account::clear_idp_session_cookie())
+                .header("cache-control", "no-store, no-cache, must-revalidate")
+                .header("pragma", "no-cache")
                 .body(String::new())
-                .unwrap())
+                .unwrap();
+            account::append_clear_all_cookies(resp.headers_mut());
+            Ok(resp)
         }
         _ => {
             let html = r#"<!DOCTYPE html>
@@ -1228,13 +1236,15 @@ async fn handle_logout(
 <style>body{font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#f8fafc}
 .card{background:#fff;padding:40px;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,.1);text-align:center}
 </style></head><body><div class="card"><h1>Signed Out</h1><p>You have been signed out successfully.</p></div></body></html>"#;
-            Ok(Response::builder()
+            let mut resp = Response::builder()
                 .status(StatusCode::OK)
                 .header("content-type", "text/html; charset=utf-8")
-                .header("cache-control", "no-store")
-                .header("set-cookie", account::clear_idp_session_cookie())
+                .header("cache-control", "no-store, no-cache, must-revalidate")
+                .header("pragma", "no-cache")
                 .body(html.to_string())
-                .unwrap())
+                .unwrap();
+            account::append_clear_all_cookies(resp.headers_mut());
+            Ok(resp)
         }
     }
 }

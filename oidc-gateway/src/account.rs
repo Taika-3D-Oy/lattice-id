@@ -135,6 +135,22 @@ pub fn clear_idp_session_cookie() -> String {
     format!("{IDP_COOKIE_NAME}=; HttpOnly;{secure} SameSite=Lax; Path=/; Max-Age=0")
 }
 
+/// Append Set-Cookie headers to clear all auth and session cookies from the browser.
+pub fn append_clear_all_cookies(headers: &mut HeaderMap) {
+    let secure = if crate::is_dev_mode() { "" } else { " Secure;" };
+    let cookies = [
+        format!("{COOKIE_NAME}=; HttpOnly;{secure} SameSite=Lax; Path=/; Max-Age=0"),
+        format!("{COOKIE_NAME}=; HttpOnly;{secure} SameSite=Strict; Path=/account; Max-Age=0"),
+        format!("{IDP_COOKIE_NAME}=; HttpOnly;{secure} SameSite=Lax; Path=/; Max-Age=0"),
+        "lid_tenant=; HttpOnly; SameSite=Lax; Path=/admin; Max-Age=0".to_string(),
+    ];
+    for c in &cookies {
+        if let Ok(val) = c.parse() {
+            headers.append("set-cookie", val);
+        }
+    }
+}
+
 /// Extract the raw lid_session token from request cookies without validating it.
 /// Used by the logout handler to delete the server-side session from NATS.
 pub fn extract_idp_session_token(headers: &HeaderMap) -> Option<String> {
@@ -888,18 +904,20 @@ pub async fn logout(headers: &HeaderMap) -> Response<String> {
     if let Some(token) = parse_cookie(headers, COOKIE_NAME) {
         let _ = store::delete_account_session(&token).await;
     }
+    if let Some(token) = parse_cookie(headers, IDP_COOKIE_NAME) {
+        let _ = store::delete_idp_session(&token).await;
+    }
 
-    let secure = if crate::is_dev_mode() { "" } else { " Secure;" };
-    Response::builder()
+    let mut resp = Response::builder()
         .status(StatusCode::FOUND)
         .header("location", "/")
-        .header(
-            "set-cookie",
-            format!("{COOKIE_NAME}=; HttpOnly;{secure} SameSite=Strict; Path=/account; Max-Age=0"),
-        )
-        .header("cache-control", "no-store")
+        .header("cache-control", "no-store, no-cache, must-revalidate")
+        .header("pragma", "no-cache")
         .body(String::new())
-        .unwrap()
+        .unwrap();
+
+    append_clear_all_cookies(resp.headers_mut());
+    resp
 }
 
 // ── Helpers ─────────────────────────────────────────────────

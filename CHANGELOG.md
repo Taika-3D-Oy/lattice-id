@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.1] - 2026-08-24
+
+### Fixed
+
+- **Complete Multi-Cookie & IdP Session Logout**:
+  - Fixed sign-out from Admin portal (`/admin/logout`), Account self-service (`/account/logout`), and RP-initiated logout (`/logout`) where active `lid_session` IdP sessions previously persisted SSO authentication.
+  - Added centralized `append_clear_all_cookies` helper to invalidate both `lid_account` (across `/` and `/account` paths), `lid_session` IdP cookie, and `lid_tenant` cookie with `Max-Age=0` and `no-store, no-cache` cache headers.
+  - Ensured server-side session records in NATS KV are deleted for all session tokens present in request headers during sign-out.
+
 ## [1.9.0] - 2026-08-24
 
 ### Added

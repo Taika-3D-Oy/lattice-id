@@ -1157,16 +1157,22 @@ async fn handle_admin_logout(headers: &HeaderMap) -> Response<String> {
             if let Some(val) = cookie.strip_prefix("lid_account=") {
                 let _ = store::delete_account_session(val).await;
             }
+            if let Some(val) = cookie.strip_prefix("lid_session=") {
+                let _ = store::delete_idp_session(val).await;
+            }
         }
     }
 
-    let secure = if crate::is_dev_mode() { "" } else { " Secure;" };
-    Response::builder()
+    let mut resp = Response::builder()
         .status(StatusCode::SEE_OTHER)
         .header("location", "/admin/login")
-        .header("set-cookie", format!("lid_account=; Path=/; HttpOnly;{secure} SameSite=Lax; Max-Age=0"))
+        .header("cache-control", "no-store, no-cache, must-revalidate")
+        .header("pragma", "no-cache")
         .body(String::new())
-        .unwrap()
+        .unwrap();
+
+    crate::account::append_clear_all_cookies(resp.headers_mut());
+    resp
 }
 
 // ── Helpers ───────────────────────────────────────────────────
