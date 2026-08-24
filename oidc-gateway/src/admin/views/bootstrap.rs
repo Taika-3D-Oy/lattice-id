@@ -31,6 +31,10 @@ pub fn render_bootstrap_page(error: Option<&str>) -> Response<String> {
                             input type="email" id="email" name="email" required placeholder="admin@example.com";
                         }
                         div class="form-group" {
+                            label for="org_name" { "Organization Name (optional)" }
+                            input type="text" id="org_name" name="org_name" placeholder="Primary Organization";
+                        }
+                        div class="form-group" {
                             label for="password" { "Password" }
                             input type="password" id="password" name="password" required minlength="8" placeholder="••••••••••••";
                         }

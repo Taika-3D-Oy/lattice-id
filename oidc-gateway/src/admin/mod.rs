@@ -670,12 +670,24 @@ async fn handle_bootstrap_submit(body: &[u8]) -> Response<String> {
     let form = parse_form(body);
     let email = form_value(&form, "email").unwrap_or("").trim();
     let password = form_value(&form, "password").unwrap_or("");
+    let confirm_password = form_value(&form, "confirm_password").unwrap_or("");
     let name = form_value(&form, "name").unwrap_or("").trim();
-    let org_name = form_value(&form, "org_name").unwrap_or("").trim();
+    let org_name_raw = form_value(&form, "org_name").unwrap_or("").trim();
+    let org_name = if org_name_raw.is_empty() {
+        "Primary Organization"
+    } else {
+        org_name_raw
+    };
 
-    if email.is_empty() || password.len() < 8 || name.is_empty() || org_name.is_empty() {
+    if email.is_empty() || password.len() < 8 || name.is_empty() {
         return views::bootstrap::render_bootstrap_page(Some(
-            "Please complete all fields. Password must be at least 8 characters.",
+            "Please complete all required fields. Password must be at least 8 characters.",
+        ));
+    }
+
+    if password != confirm_password {
+        return views::bootstrap::render_bootstrap_page(Some(
+            "Passwords do not match. Please re-enter your password.",
         ));
     }
 
@@ -685,7 +697,7 @@ async fn handle_bootstrap_submit(body: &[u8]) -> Response<String> {
     };
 
     let user_id = format!("user_{}", &store::random_alphanumeric(16));
-    let user = User {
+    let mut user = User {
         id: user_id.clone(),
         email: email.to_string(),
         name: name.to_string(),
@@ -699,11 +711,30 @@ async fn handle_bootstrap_submit(body: &[u8]) -> Response<String> {
         passkey_credentials: Vec::new(),
     };
 
+    // If a bootstrap hook is configured in deployment settings, enforce authorization
+    if crate::get_bootstrap_hook().is_some() {
+        let boot = crate::hooks::execute_bootstrap_hook(&user).await;
+        if let Some(reason) = &boot.deny_reason {
+            return views::bootstrap::render_bootstrap_page(Some(&format!("Bootstrap denied: {reason}")));
+        }
+        if boot.set_superadmin != Some(true) {
+            return views::bootstrap::render_bootstrap_page(Some(
+                "Access denied: This email address is not authorized to bootstrap the authority.",
+            ));
+        }
+        let _ = crate::hooks::apply_outcome(&mut user, &boot).await;
+    }
+
     if let Err(e) = store::create_user(&user).await {
         return views::bootstrap::render_bootstrap_page(Some(&format!("Failed to save user: {e}")));
     }
 
     let _ = store::set_superadmin_flag(true).await;
+
+    // Ensure standard clients exist
+    let issuer = crate::get_issuer();
+    let _ = store::ensure_default_client().await;
+    let _ = store::ensure_admin_client(&issuer, false).await;
 
     // Create Initial Organization
     let tenant_id = format!("tenant_{}", &store::random_alphanumeric(12));
@@ -729,6 +760,13 @@ async fn handle_bootstrap_submit(body: &[u8]) -> Response<String> {
         joined_at: store::unix_now(),
     };
     let _ = store::add_membership(&membership).await;
+
+    let _ = store::log_audit(
+        "bootstrap_completed",
+        &user.id,
+        &user.id,
+        &format!("Superadmin initialized: {}", user.email),
+    ).await;
 
     // Create session token and set cookie
     let session_token = store::random_hex(32);
