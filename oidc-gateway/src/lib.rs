@@ -168,16 +168,25 @@ impl bindings::exports::wasi::http::incoming_handler::Guest for Component {
         let _ = outgoing_resp.set_status_code(resp.status().as_u16());
 
         let body = outgoing_resp.body().expect("outgoing body");
-        if let Ok(stream) = body.write() {
-            let _ = stream.blocking_write_and_flush(resp.body().as_bytes());
-            drop(stream);
-        }
-        let _ = bindings::wasi::http::types::OutgoingBody::finish(body, None);
 
         bindings::exports::wasi::http::incoming_handler::ResponseOutparam::set(
             response_out,
             Ok(outgoing_resp),
         );
+
+        if let Ok(stream) = body.write() {
+            let bytes = resp.body().as_bytes();
+            let mut offset = 0;
+            while offset < bytes.len() {
+                let end = (offset + 4096).min(bytes.len());
+                if stream.blocking_write_and_flush(&bytes[offset..end]).is_err() {
+                    break;
+                }
+                offset = end;
+            }
+            drop(stream);
+        }
+        let _ = bindings::wasi::http::types::OutgoingBody::finish(body, None);
     }
 }
 
