@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.3] - 2026-08-25
+
+### Fixed
+
+- **Admin Portal Passkey Registration**:
+  - Added dedicated cookie-session authenticated endpoints `POST /admin/account/passkeys/register-options` and `POST /admin/account/passkeys/register-complete` with CSRF protection.
+  - Fixed Admin UI passkey script calling Management API endpoints without Bearer tokens, resolving `missing Authorization header` error.
+  - Fixed self-service account passkey registration script referencing undefined variable and missing challenge endpoint.
+
+## [1.9.2] - 2026-08-24
+
+### Fixed
+
+- **Security Hardening**:
+  - Added SSRF protection for backchannel logout and social IdP endpoints with strict external URL validation.
+  - Mitigated timing side-channels on user authentication paths.
+  - Enforced session-bound CSRF token validation across state-mutating admin routes.
+
 ## [1.9.1] - 2026-08-24
 
 ### Fixed

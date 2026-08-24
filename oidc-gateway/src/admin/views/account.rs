@@ -95,12 +95,23 @@ pub async fn render_account_page(session: &AdminSession) -> Response<String> {
                 const name = prompt("Enter a name for this passkey (e.g. YubiKey 5, MacBook TouchID):", "Admin Key");
                 if (!name) return;
                 try {{
-                    const resp = await fetch("/api/users/{}/passkeys/register-options", {{
+                    const resp = await fetch("/admin/account/passkeys/register-options", {{
                         method: "POST",
-                        headers: {{ "Content-Type": "application/json" }},
+                        headers: {{
+                            "Content-Type": "application/json",
+                            "x-csrf-token": "{csrf_token}"
+                        }},
                         body: "{{}}"
                     }});
-                    if (!resp.ok) throw new Error(await resp.text());
+                    if (!resp.ok) {{
+                        const errText = await resp.text();
+                        let msg = errText;
+                        try {{
+                            const errObj = JSON.parse(errText);
+                            msg = errObj.error_description || errObj.error || errText;
+                        }} catch(_) {{}}
+                        throw new Error(msg);
+                    }}
                     const data = await resp.json();
                     
                     function base64UrlToBuffer(b64) {{
@@ -130,9 +141,12 @@ pub async fn render_account_page(session: &AdminSession) -> Response<String> {
                     }}
 
                     const credential = await navigator.credentials.create({{ publicKey }});
-                    const completeResp = await fetch("/api/users/{}/passkeys/register-complete", {{
+                    const completeResp = await fetch("/admin/account/passkeys/register-complete", {{
                         method: "POST",
-                        headers: {{ "Content-Type": "application/json" }},
+                        headers: {{
+                            "Content-Type": "application/json",
+                            "x-csrf-token": "{csrf_token}"
+                        }},
                         body: JSON.stringify({{
                             token: data.token,
                             clientDataJSON: bufferToBase64Url(credential.response.clientDataJSON),
@@ -140,13 +154,21 @@ pub async fn render_account_page(session: &AdminSession) -> Response<String> {
                             name: name
                         }})
                     }});
-                    if (!completeResp.ok) throw new Error(await completeResp.text());
+                    if (!completeResp.ok) {{
+                        const errText = await completeResp.text();
+                        let msg = errText;
+                        try {{
+                            const errObj = JSON.parse(errText);
+                            msg = errObj.error_description || errObj.error || errText;
+                        }} catch(_) {{}}
+                        throw new Error(msg);
+                    }}
                     window.location.reload();
                 }} catch (e) {{
                     alert("Passkey registration failed: " + e.message);
                 }}
             }}
-            "#, session.user.id, session.user.id)))
+            "#, csrf_token = session.csrf_token)))
         }
     };
 

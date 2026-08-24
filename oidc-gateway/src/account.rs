@@ -453,27 +453,19 @@ function b64urlDecode(s) {{
 async function registerPasskey() {{
     var errEl = document.getElementById('pk-error');
     var btn = document.getElementById('pk-register');
+    var nameInput = document.getElementById('pk-name');
+    var name = (nameInput && nameInput.value.trim()) || 'My Passkey';
     errEl.style.display = 'none';
     btn.disabled = true;
-    btn.textContent = 'Waiting for passkey\u2026';
     btn.textContent = 'Waiting for authenticator\u2026';
 
     try {{
-        var r = await fetch('/passkeys/register-options', {{
-            method: 'POST',
-            headers: {{ 'content-type': 'application/json' }},
-            body: '{{}}'
-        }});
-        if (!r.ok) throw new Error(await r.text());
-        var d = await r.json();
-        CHALLENGE_TOKEN = d.token;
-        var opts = d.publicKey;
+        var opts = Object.assign({{}}, REG_OPTIONS.publicKey);
         opts.challenge = b64urlDecode(opts.challenge);
-        opts.user.id = b64urlDecode(opts.user.id);
+        opts.user = Object.assign({{}}, opts.user, {{ id: b64urlDecode(opts.user.id) }});
         if (opts.excludeCredentials) {{
             opts.excludeCredentials = opts.excludeCredentials.map(function(c) {{
-                c.id = b64urlDecode(c.id);
-                return c;
+                return Object.assign({{}}, c, {{ id: b64urlDecode(c.id) }});
             }});
         }}
         var cred = await navigator.credentials.create({{ publicKey: opts }});

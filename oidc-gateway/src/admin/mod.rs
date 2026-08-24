@@ -2,6 +2,7 @@ pub mod layout;
 pub mod static_assets;
 pub mod views;
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use http::{HeaderMap, Method, Response, StatusCode};
 use crate::admin::layout::AdminSession;
 use crate::store::{self, AccountSession, ClientTheme, Hook, HookVersion, IdentityProvider, Invitation, Membership, OidcClient, Tenant, User};
@@ -379,6 +380,12 @@ pub async fn handle_admin_route(
         // ── My Account ──
         (&Method::GET, "/admin/account") => {
             views::account::render_account_page(&session).await
+        }
+        (&Method::POST, "/admin/account/passkeys/register-options") => {
+            handle_admin_passkey_register_options(&session).await
+        }
+        (&Method::POST, "/admin/account/passkeys/register-complete") => {
+            handle_admin_passkey_register_complete(&session, body).await
         }
 
         // ── Parameterized Route Handling ──
@@ -1244,6 +1251,197 @@ async fn handle_admin_logout(headers: &HeaderMap) -> Response<String> {
     resp
 }
 
+async fn handle_admin_passkey_register_options(session: &AdminSession) -> Response<String> {
+    let user_id = &session.user.id;
+    let user = match store::get_user(user_id).await {
+        Ok(Some(u)) => u,
+        Ok(None) => return json_error_response(StatusCode::NOT_FOUND, "user not found"),
+        Err(e) => {
+            return json_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("database error: {e}"),
+            )
+        }
+    };
+
+    let challenge = crate::passkeys::generate_challenge();
+    let existing_cred_ids: Vec<String> = user
+        .passkey_credentials
+        .iter()
+        .map(|c| c.credential_id.clone())
+        .collect();
+
+    let token = store::random_hex(32);
+    let pc = store::PasskeyChallenge {
+        challenge: challenge.clone(),
+        purpose: "register".into(),
+        user_id: user_id.clone(),
+        session_id: String::new(),
+        expires_at: store::unix_now() + 300, // 5 minutes
+    };
+    if let Err(e) = store::save_passkey_challenge(&token, &pc).await {
+        return json_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("failed to save challenge: {e}"),
+        );
+    }
+
+    let display_name = if user.name.is_empty() {
+        &user.email
+    } else {
+        &user.name
+    };
+    let options = crate::passkeys::registration_options_json(
+        user_id,
+        &user.email,
+        display_name,
+        &challenge,
+        &existing_cred_ids,
+    );
+
+    json_response(
+        StatusCode::OK,
+        &serde_json::json!({
+            "token": token,
+            "publicKey": options,
+        }),
+    )
+}
+
+async fn handle_admin_passkey_register_complete(
+    session: &AdminSession,
+    body: &[u8],
+) -> Response<String> {
+    let user_id = &session.user.id;
+
+    #[derive(serde::Deserialize)]
+    struct RegCompleteReq {
+        token: String,
+        #[serde(rename = "clientDataJSON")]
+        client_data_json: String,
+        #[serde(rename = "attestationObject")]
+        attestation_object: String,
+        #[serde(default)]
+        name: String,
+    }
+
+    let req: RegCompleteReq = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(e) => {
+            return json_error_response(StatusCode::BAD_REQUEST, &format!("invalid JSON: {e}"))
+        }
+    };
+
+    let pc = match store::get_passkey_challenge(&req.token).await {
+        Ok(Some(pc)) => pc,
+        Ok(None) => {
+            return json_error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid or expired registration token",
+            )
+        }
+        Err(e) => {
+            return json_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("database error: {e}"),
+            )
+        }
+    };
+
+    if pc.purpose != "register" || pc.user_id != *user_id {
+        return json_error_response(StatusCode::BAD_REQUEST, "token mismatch");
+    }
+    if store::unix_now() > pc.expires_at {
+        let _ = store::delete_passkey_challenge(&req.token).await;
+        return json_error_response(StatusCode::BAD_REQUEST, "registration token expired");
+    }
+    let _ = store::delete_passkey_challenge(&req.token).await;
+
+    let issuer = crate::get_issuer();
+    let parsed = match crate::passkeys::verify_registration(
+        &req.client_data_json,
+        &req.attestation_object,
+        &pc.challenge,
+        &issuer,
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            return json_error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("registration verification failed: {e}"),
+            )
+        }
+    };
+
+    let credential_id = URL_SAFE_NO_PAD.encode(&parsed.credential_id);
+    let public_key = URL_SAFE_NO_PAD.encode(&parsed.public_key_bytes);
+
+    let user = match store::get_user(user_id).await {
+        Ok(Some(u)) => u,
+        Ok(None) => return json_error_response(StatusCode::NOT_FOUND, "user not found"),
+        Err(e) => {
+            return json_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("database error: {e}"),
+            )
+        }
+    };
+
+    if user
+        .passkey_credentials
+        .iter()
+        .any(|c| c.credential_id == credential_id)
+    {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            "this passkey is already registered",
+        );
+    }
+
+    let name = if req.name.is_empty() {
+        format!("Passkey {}", user.passkey_credentials.len() + 1)
+    } else {
+        req.name
+    };
+
+    let cred = store::PasskeyCredential {
+        credential_id: credential_id.clone(),
+        public_key,
+        sign_count: parsed.sign_count,
+        name: name.clone(),
+        created_at: store::unix_now(),
+    };
+
+    if let Err(e) = store::update_user_rmw(user_id, |u| {
+        u.passkey_credentials.push(cred.clone());
+        Ok(true)
+    })
+    .await
+    {
+        return json_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("failed to update user: {e}"),
+        );
+    }
+
+    if let Err(e) = store::index_passkey_credential(&credential_id, user_id).await {
+        return json_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("failed to index credential: {e}"),
+        );
+    }
+
+    let _ = store::log_audit("passkey_registered", user_id, user_id, &name).await;
+
+    json_response(
+        StatusCode::OK,
+        &serde_json::json!({
+            "credential_id": credential_id,
+            "name": name,
+        }),
+    )
+}
+
 // ── Helpers ───────────────────────────────────────────────────
 
 fn html_response(html: String) -> Response<String> {
@@ -1251,6 +1449,28 @@ fn html_response(html: String) -> Response<String> {
         .status(StatusCode::OK)
         .header("content-type", "text/html; charset=utf-8")
         .body(html)
+        .unwrap()
+}
+
+fn json_response(status: StatusCode, value: &serde_json::Value) -> Response<String> {
+    Response::builder()
+        .status(status)
+        .header("content-type", "application/json")
+        .body(serde_json::to_string(value).unwrap_or_default())
+        .unwrap()
+}
+
+fn json_error_response(status: StatusCode, error_description: &str) -> Response<String> {
+    Response::builder()
+        .status(status)
+        .header("content-type", "application/json")
+        .body(
+            serde_json::to_string(&serde_json::json!({
+                "error": "invalid_request",
+                "error_description": error_description,
+            }))
+            .unwrap_or_default(),
+        )
         .unwrap()
 }
 
@@ -1401,5 +1621,86 @@ mod tests {
         let res3 = verify_admin_csrf(&headers, b"name=acme&csrf_token=wrong-csrf-token", &session);
         assert!(res3.is_err());
         assert_eq!(res3.unwrap_err().status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn test_admin_passkey_json_responses() {
+        let ok_res = json_response(StatusCode::OK, &serde_json::json!({ "token": "abc" }));
+        assert_eq!(ok_res.status(), StatusCode::OK);
+        assert_eq!(ok_res.headers().get("content-type").unwrap(), "application/json");
+        assert_eq!(ok_res.body(), r#"{"token":"abc"}"#);
+
+        let err_res = json_error_response(StatusCode::BAD_REQUEST, "invalid token");
+        assert_eq!(err_res.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(err_res.headers().get("content-type").unwrap(), "application/json");
+        let body: serde_json::Value = serde_json::from_str(err_res.body()).unwrap();
+        assert_eq!(body["error"], "invalid_request");
+        assert_eq!(body["error_description"], "invalid token");
+    }
+
+    #[test]
+    fn test_admin_passkey_register_complete_invalid_json() {
+        futures::executor::block_on(async {
+            let session = AdminSession {
+                user: User {
+                    id: "admin-user-pk-test-3".to_string(),
+                    email: "admin-pk-3@example.com".to_string(),
+                    name: "Admin User 3".to_string(),
+                    password_hash: "hash".to_string(),
+                    status: "active".to_string(),
+                    created_at: 0,
+                    superadmin: true,
+                    totp_secret: None,
+                    totp_enabled: false,
+                    recovery_codes: vec![],
+                    passkey_credentials: vec![],
+                },
+                is_superadmin: true,
+                current_tenant: None,
+                tenants: vec![],
+                csrf_token: "csrf-token-12345".to_string(),
+            };
+
+            let res = handle_admin_passkey_register_complete(&session, b"not-a-json").await;
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+            let body: serde_json::Value = serde_json::from_str(res.body()).unwrap();
+            assert_eq!(body["error"], "invalid_request");
+            assert!(body["error_description"].as_str().unwrap().contains("invalid JSON"));
+        });
+    }
+
+    #[test]
+    fn test_admin_passkey_csrf_validation() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-csrf-token", "valid-csrf-token".parse().unwrap());
+        headers.insert("content-type", "application/json".parse().unwrap());
+
+        let session = AdminSession {
+            user: User {
+                id: "admin1".to_string(),
+                email: "admin@example.com".to_string(),
+                name: "Admin".to_string(),
+                password_hash: "hash".to_string(),
+                status: "active".to_string(),
+                created_at: 0,
+                superadmin: true,
+                totp_secret: None,
+                totp_enabled: false,
+                recovery_codes: vec![],
+                passkey_credentials: vec![],
+            },
+            is_superadmin: true,
+            current_tenant: None,
+            tenants: vec![],
+            csrf_token: "valid-csrf-token".to_string(),
+        };
+
+        // Valid CSRF token in header passes
+        assert!(verify_admin_csrf(&headers, b"{}", &session).is_ok());
+
+        // Wrong CSRF token in header fails
+        let mut wrong_headers = HeaderMap::new();
+        wrong_headers.insert("x-csrf-token", "wrong-token".parse().unwrap());
+        assert!(verify_admin_csrf(&wrong_headers, b"{}", &session).is_err());
     }
 }
