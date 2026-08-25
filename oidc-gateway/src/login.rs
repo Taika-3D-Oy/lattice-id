@@ -952,6 +952,12 @@ pub async fn consent_page(
 
     let csrf_token = crate::util::html_escape(&auth_code.csrf_token);
 
+    let logout_link = format!(
+        "/logout?client_id={}&post_logout_redirect_uri={}",
+        crate::util::percent_encode(&auth_code.client_id),
+        crate::util::percent_encode(&auth_code.redirect_uri)
+    );
+
     let html = format!(
         r#"<!DOCTYPE html>
 <html lang="en">
@@ -982,7 +988,7 @@ button{{flex:1;padding:12px;border:none;border-radius:calc(var(--radius) * 0.7);
 <div class="card">
 {logo_html}
 <h1>Authorise <span class="client-name">{app_name}</span></h1>
-<p class="sub">Signed in as {user_email}</p>
+<p class="sub">Signed in as <strong>{user_email}</strong> &bull; <a href="{logout_link}" style="color:var(--primary);text-decoration:none">Switch account</a></p>
 
 <p style="font-size:14px;color:var(--text-muted);margin-bottom:12px"><strong>{app_name}</strong> is requesting access to:</p>
 <ul>
@@ -992,7 +998,6 @@ button{{flex:1;padding:12px;border:none;border-radius:calc(var(--radius) * 0.7);
 <form method="POST" action="/consent">
 <input type="hidden" name="code" value="{code}">
 <input type="hidden" name="csrf_token" value="{csrf_token}">
-<input type="hidden" name="decision" value="approve">
 <div class="actions">
 <button type="submit" class="btn-approve" name="decision" value="approve">Allow access</button>
 <button type="submit" class="btn-deny" name="decision" value="deny">Deny</button>

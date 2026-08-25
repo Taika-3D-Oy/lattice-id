@@ -1149,6 +1149,10 @@ async fn handle_logout(
         .iter()
         .find(|(k, _)| k == "state")
         .map(|(_, v)| v.as_str());
+    let client_id_param = params
+        .iter()
+        .find(|(k, _)| k == "client_id" || k == "client_id_hint")
+        .map(|(_, v)| v.as_str());
 
     // Try to identify the user from id_token_hint or Authorization header
     let token = id_token_hint.or_else(|| {
@@ -1192,11 +1196,10 @@ async fn handle_logout(
     }
 
     // Redirect to post_logout_redirect_uri if provided, otherwise show confirmation.
-    // RP-Initiated Logout 1.0: the URI must be registered with the *specific*
-    // client identified by id_token_hint. If id_token_hint is missing or invalid,
-    // reject the redirect to prevent open-redirect abuse.
+    // RP-Initiated Logout 1.0: the URI must be registered with the client identified
+    // by id_token_hint or client_id. If missing or unregistered, reject the redirect.
     let uri_allowed = async |uri: &str| -> bool {
-        let Some(cid) = hinted_client_id.as_deref() else {
+        let Some(cid) = hinted_client_id.as_deref().or(client_id_param) else {
             return false;
         };
         match store::get_client(cid).await {
@@ -1228,9 +1231,13 @@ async fn handle_logout(
         _ => {
             let html = r#"<!DOCTYPE html>
 <html><head><title>Logged Out</title>
-<style>body{font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#f8fafc}
-.card{background:#fff;padding:40px;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,.1);text-align:center}
-</style></head><body><div class="card"><h1>Signed Out</h1><p>You have been signed out successfully.</p></div></body></html>"#;
+<style>body{font-family:system-ui,-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#090d16;color:#f1f5f9;margin:0}
+.card{background:#111827;border:1px solid #1f2937;padding:40px;border-radius:12px;box-shadow:0 10px 25px -5px rgba(0,0,0,.5);text-align:center;max-width:400px;width:100%}
+h1{font-size:22px;margin-bottom:8px;color:#f9fafb}
+p{color:#9ca3af;font-size:14px;margin-bottom:24px}
+.btn{display:inline-block;padding:10px 20px;background:#06b6d4;color:#090d16;text-decoration:none;border-radius:8px;font-weight:600;font-size:14px;transition:background .15s}
+.btn:hover{background:#22d3ee}
+</style></head><body><div class="card"><h1>Signed Out</h1><p>You have been signed out successfully.</p><a href="/" class="btn">Sign In Again</a></div></body></html>"#;
             let mut resp = Response::builder()
                 .status(StatusCode::OK)
                 .header("content-type", "text/html; charset=utf-8")
