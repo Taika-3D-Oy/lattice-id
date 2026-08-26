@@ -295,7 +295,12 @@ pub async fn handle(
                 if user.status == "active" {
                     let builtin_clients = ["lid-admin", "lid-default"];
                     let is_first_party = client.first_party || builtin_clients.contains(&client_id);
-                    let needs_consent = prompt == "consent" || !is_first_party;
+                    let already_consented = if prompt == "consent" {
+                        false
+                    } else {
+                        store::has_user_consented(&user.id, client_id, scope).await.unwrap_or(false)
+                    };
+                    let needs_consent = prompt == "consent" || (!is_first_party && !already_consented);
 
                     let code = store::random_hex(32);
                     let acr = crate::login::acr_from_amr(&sso.amr);
@@ -320,7 +325,7 @@ pub async fn handle(
                     store::save_auth_code(&code, &auth_code).await?;
                     let _ = store::log_audit("sso_reuse", &user.id, &user.id, client_id).await;
 
-                    // Slide the IdP session TTL (rolling 30-minute window).
+                    // Slide the IdP session TTL (rolling window).
                     let refreshed_idp =
                         crate::account::refresh_idp_session_cookie_header(headers).await;
                     let account_cookie = crate::account::create_session_cookie(&user.id).await.ok();
@@ -391,6 +396,7 @@ pub async fn handle(
             .or_else(|| login_hint.filter(|h| !h.is_empty()).map(|h| h.to_string())),
         created_at: store::unix_now(),
         needs_consent,
+        prompt: if prompt.is_empty() { None } else { Some(prompt.to_string()) },
     };
     store::save_auth_session(&session_id, &session).await?;
 

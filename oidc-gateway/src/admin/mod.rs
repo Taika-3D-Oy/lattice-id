@@ -157,6 +157,21 @@ pub async fn handle_admin_route(
             let name = form_value(&form, "name").unwrap_or("").trim();
             let client_type = form_value(&form, "client_type").unwrap_or("confidential");
             let uris_raw = form_value(&form, "redirect_uris").unwrap_or("");
+            let first_party = form_value(&form, "first_party").map(|v| v == "true" || v == "on").unwrap_or(false);
+            let id_token_signed_response_alg = form_value(&form, "id_token_signed_response_alg")
+                .filter(|a| !a.trim().is_empty())
+                .map(|a| a.trim().to_string());
+            let backchannel_logout_uri = form_value(&form, "backchannel_logout_uri")
+                .filter(|u| !u.trim().is_empty())
+                .map(|u| u.trim().to_string());
+            let mut grant_types: Vec<String> = crate::util::form_values(&form, "grant_types")
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect();
+            if grant_types.is_empty() {
+                grant_types = vec!["authorization_code".to_string(), "refresh_token".to_string()];
+            }
+
             let app_name = form_value(&form, "app_name").filter(|s| !s.trim().is_empty()).unwrap_or(name).to_string();
             let theme_preset = form_value(&form, "theme_preset").filter(|s| !s.trim().is_empty()).map(|s| s.to_string());
             let logo_url = form_value(&form, "logo_url").filter(|s| !s.trim().is_empty()).map(|s| s.to_string());
@@ -197,8 +212,11 @@ pub async fn handle_admin_route(
                 client_id: client_id.clone(),
                 client_secret,
                 redirect_uris,
-                grant_types: vec!["authorization_code".to_string(), "refresh_token".to_string()],
+                grant_types,
                 name: name.to_string(),
+                first_party,
+                id_token_signed_response_alg,
+                backchannel_logout_uri,
                 theme,
                 ..Default::default()
             };
@@ -356,6 +374,14 @@ pub async fn handle_admin_route(
                 def_theme.custom_css = if css.trim().is_empty() { None } else { Some(css.to_string()) };
             }
 
+            if let Some(days_str) = form_value(&form, "idp_session_ttl_days") {
+                if let Ok(days) = days_str.trim().parse::<u64>() {
+                    if days >= 1 && days <= 90 {
+                        settings.idp_session_ttl_seconds = Some(days * 86400);
+                    }
+                }
+            }
+
             settings.default_theme = Some(def_theme);
             let _ = store::save_runtime_settings(&settings).await;
             redirect_response("/admin/settings")
@@ -479,6 +505,44 @@ async fn handle_parameterized_route(
                         client.redirect_uris = uris.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
                         let _ = store::save_client(&client).await;
                     }
+                }
+                return redirect_response(&format!("/admin/clients/{id}"));
+            }
+            if sub == "settings" && method == Method::POST {
+                let form = parse_form(body);
+                if let Ok(Some(mut client)) = store::get_client(id).await {
+                    if let Some(name) = form_value(&form, "name") {
+                        if !name.trim().is_empty() {
+                            client.name = name.trim().to_string();
+                        }
+                    }
+                    let first_party = form_value(&form, "first_party").map(|v| v == "true" || v == "on").unwrap_or(false);
+                    client.first_party = first_party;
+                    let alg = form_value(&form, "id_token_signed_response_alg")
+                        .filter(|a| !a.trim().is_empty())
+                        .map(|a| a.trim().to_string());
+                    client.id_token_signed_response_alg = alg;
+                    let gts: Vec<String> = crate::util::form_values(&form, "grant_types")
+                        .into_iter()
+                        .map(|s| s.to_string())
+                        .collect();
+                    if !gts.is_empty() {
+                        client.grant_types = gts;
+                    }
+                    let _ = store::save_client(&client).await;
+                }
+                return redirect_response(&format!("/admin/clients/{id}"));
+            }
+            if sub == "backchannel-logout" && method == Method::POST {
+                let form = parse_form(body);
+                if let Ok(Some(mut client)) = store::get_client(id).await {
+                    let uri = form_value(&form, "backchannel_logout_uri")
+                        .filter(|u| !u.trim().is_empty())
+                        .map(|u| u.trim().to_string());
+                    client.backchannel_logout_uri = uri;
+                    let req_sid = form_value(&form, "backchannel_logout_session_required").map(|v| v == "true" || v == "on").unwrap_or(false);
+                    client.backchannel_logout_session_required = req_sid;
+                    let _ = store::save_client(&client).await;
                 }
                 return redirect_response(&format!("/admin/clients/{id}"));
             }

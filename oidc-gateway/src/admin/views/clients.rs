@@ -37,7 +37,8 @@ pub fn render_clients_table(clients: &[OidcClient]) -> Markup {
                     tr {
                         th { "Client Name" }
                         th { "Client ID" }
-                        th { "Type" }
+                        th { "Trust & Type" }
+                        th { "Signing Alg" }
                         th { "Redirect URIs" }
                         th class="actions" { "Actions" }
                     }
@@ -45,7 +46,7 @@ pub fn render_clients_table(clients: &[OidcClient]) -> Markup {
                 tbody id="clients-table-body" {
                     @if clients.is_empty() {
                         tr {
-                            td colspan="5" class="text-muted" style="text-align:center; padding: 24px;" {
+                            td colspan="6" class="text-muted" style="text-align:center; padding: 24px;" {
                                 "No OAuth clients registered yet."
                             }
                         }
@@ -62,11 +63,21 @@ pub fn render_clients_table(clients: &[OidcClient]) -> Markup {
                                     span class="copy-chip" onclick="copyToClipboard(this, this.innerText)" { (c.client_id) }
                                 }
                                 td {
-                                    @if is_confidential {
-                                        span class="badge badge-accent" { "Confidential" }
-                                    } @else {
-                                        span class="badge badge-muted" { "Public (PKCE)" }
+                                    div style="display:flex; gap:6px; flex-wrap:wrap; align-items:center;" {
+                                        @if c.first_party {
+                                            span class="badge badge-accent" style="background: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3);" { "First-Party" }
+                                        } @else {
+                                            span class="badge badge-muted" { "3rd-Party" }
+                                        }
+                                        @if is_confidential {
+                                            span class="badge badge-accent" { "Confidential" }
+                                        } @else {
+                                            span class="badge badge-muted" { "Public (PKCE)" }
+                                        }
                                     }
+                                }
+                                td class="mono-sm" {
+                                    span class="badge badge-muted" { (c.id_token_signed_response_alg.as_deref().unwrap_or("RS256")) }
                                 }
                                 td class="mono-sm" {
                                     (c.redirect_uris.len()) " configured"
@@ -102,13 +113,61 @@ pub fn render_new_client_modal() -> Markup {
                     }
                     div class="form-group" {
                         label for="redirect_uris" { "Redirect URIs (one per line)" }
-                        textarea id="redirect_uris" name="redirect_uris" required placeholder="https://app.example.com/oauth/callback\nhttp://localhost:3000/callback" {}
+                        textarea id="redirect_uris" name="redirect_uris" required placeholder="https://app.example.com/oauth/callback&#10;http://localhost:3000/callback" {}
                     }
                     div class="form-group" {
                         label for="client_type" { "Client Type" }
                         select id="client_type" name="client_type" {
                             option value="confidential" { "Confidential (Generates Client Secret for server-side apps)" }
                             option value="public" { "Public (SPA / Native Mobile App with PKCE)" }
+                        }
+                    }
+
+                    div class="form-group" style="margin-bottom: 16px; padding: 12px; background: rgba(16, 185, 129, 0.05); border: 1px solid rgba(16, 185, 129, 0.2); border-radius: var(--radius);" {
+                        label class="checkbox-label" style="display:flex; align-items:flex-start; gap:8px; cursor:pointer;" {
+                            input type="checkbox" id="first_party" name="first_party" value="true";
+                            div {
+                                span style="font-weight:600;" { "First-Party / Trusted Application" }
+                                p class="text-muted" style="margin:2px 0 0; font-size:12px; line-height:1.4;" {
+                                    "Skip user consent screen on authorization. Recommended for official in-house apps (NERD, Foot Generator, AFO)."
+                                }
+                            }
+                        }
+                    }
+
+                    div class="form-group" style="margin-bottom: 16px;" {
+                        label { "Allowed Grant Types" }
+                        div style="display:grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 4px;" {
+                            label class="checkbox-label" style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;" {
+                                input type="checkbox" name="grant_types" value="authorization_code" checked;
+                                span { "Authorization Code" }
+                            }
+                            label class="checkbox-label" style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;" {
+                                input type="checkbox" name="grant_types" value="refresh_token" checked;
+                                span { "Refresh Token" }
+                            }
+                            label class="checkbox-label" style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;" {
+                                input type="checkbox" name="grant_types" value="client_credentials";
+                                span { "Client Credentials" }
+                            }
+                            label class="checkbox-label" style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;" {
+                                input type="checkbox" name="grant_types" value="urn:ietf:params:oauth:grant-type:device_code";
+                                span { "Device Code (RFC 8628)" }
+                            }
+                        }
+                    }
+
+                    div class="form-grid" style="display:grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;" {
+                        div class="form-group" {
+                            label for="id_token_signed_response_alg" { "ID Token Signing Alg" }
+                            select id="id_token_signed_response_alg" name="id_token_signed_response_alg" {
+                                option value="RS256" { "RS256 (RSA SHA-256)" }
+                                option value="ES256" { "ES256 (ECDSA P-256)" }
+                            }
+                        }
+                        div class="form-group" {
+                            label for="backchannel_logout_uri" { "Back-Channel Logout URI" }
+                            input type="text" id="backchannel_logout_uri" name="backchannel_logout_uri" placeholder="https://app.example.com/backchannel-logout";
                         }
                     }
 
@@ -195,6 +254,15 @@ pub async fn render_client_detail_page(session: &AdminSession, client: &OidcClie
                     }
                 }
 
+                div class="label" { "Trust Level" }
+                div class="value" {
+                    @if client.first_party {
+                        span class="badge badge-accent" style="background: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3);" { "First-Party (Consent Bypassed)" }
+                    } @else {
+                        span class="badge badge-muted" { "Third-Party (Consent Required)" }
+                    }
+                }
+
                 @if let Some(ref secret) = client.client_secret {
                     div class="label" { "Client Secret" }
                     div class="value" {
@@ -213,6 +281,65 @@ pub async fn render_client_detail_page(session: &AdminSession, client: &OidcClie
             }
         }
 
+        // ── General & OAuth Configuration Card ──
+        div class="card" {
+            div class="card-header" {
+                span class="card-title" { "OAuth & Trust Settings" }
+            }
+            form hx-post={"/admin/clients/" (client.client_id) "/settings"} hx-target="body" {
+                div class="form-group" style="margin-bottom: 16px;" {
+                    label for="name" { "Application Name" }
+                    input type="text" id="name" name="name" value=(client.name) required;
+                }
+
+                div class="form-group" style="margin-bottom: 16px; padding: 14px; background: rgba(16, 185, 129, 0.05); border: 1px solid rgba(16, 185, 129, 0.2); border-radius: var(--radius);" {
+                    label class="checkbox-label" style="display:flex; align-items:flex-start; gap:8px; cursor:pointer;" {
+                        input type="checkbox" id="first_party" name="first_party" value="true" checked[client.first_party];
+                        div {
+                            span style="font-weight:600; color: var(--text);" { "First-Party / Trusted Application" }
+                            p class="text-muted" style="margin:4px 0 0; font-size:12px; line-height:1.4;" {
+                                "When enabled, users authenticating with this client will not be prompted with the consent screen (unless prompt=consent is explicitly requested). Recommended for official apps (NERD, Foot Generator, AFO)."
+                            }
+                        }
+                    }
+                }
+
+                div class="form-group" style="margin-bottom: 16px;" {
+                    label for="id_token_signed_response_alg" { "ID Token Signing Algorithm" }
+                    select id="id_token_signed_response_alg" name="id_token_signed_response_alg" {
+                        @let current_alg = client.id_token_signed_response_alg.as_deref().unwrap_or("RS256");
+                        option value="RS256" selected[current_alg == "RS256"] { "RS256 (RSA SHA-256 - Default)" }
+                        option value="ES256" selected[current_alg == "ES256"] { "ES256 (ECDSA P-256 SHA-256)" }
+                    }
+                    div class="form-hint" { "Algorithm used to sign OIDC ID Tokens issued to this application." }
+                }
+
+                div class="form-group" style="margin-bottom: 20px;" {
+                    label { "Allowed Grant Types" }
+                    div style="display:grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 6px;" {
+                        label class="checkbox-label" style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;" {
+                            input type="checkbox" name="grant_types" value="authorization_code" checked[client.grant_types.contains(&"authorization_code".to_string())];
+                            span { "Authorization Code" }
+                        }
+                        label class="checkbox-label" style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;" {
+                            input type="checkbox" name="grant_types" value="refresh_token" checked[client.grant_types.contains(&"refresh_token".to_string())];
+                            span { "Refresh Token" }
+                        }
+                        label class="checkbox-label" style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;" {
+                            input type="checkbox" name="grant_types" value="client_credentials" checked[client.grant_types.contains(&"client_credentials".to_string())];
+                            span { "Client Credentials" }
+                        }
+                        label class="checkbox-label" style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;" {
+                            input type="checkbox" name="grant_types" value="urn:ietf:params:oauth:grant-type:device_code" checked[client.grant_types.contains(&"urn:ietf:params:oauth:grant-type:device_code".to_string())];
+                            span { "Device Code (RFC 8628)" }
+                        }
+                    }
+                }
+
+                button type="submit" class="btn btn-primary" { "Save OAuth Settings" }
+            }
+        }
+
         // ── Redirect URIs Card ──
         div class="card" {
             div class="card-header" {
@@ -224,6 +351,29 @@ pub async fn render_client_detail_page(session: &AdminSession, client: &OidcClie
                     div class="form-hint" { "One URL per line. Absolute HTTP/HTTPS URLs." }
                 }
                 button type="submit" class="btn btn-primary" { "Save Redirect URIs" }
+            }
+        }
+
+        // ── Back-Channel Logout Card ──
+        div class="card" {
+            div class="card-header" {
+                span class="card-title" { "Back-Channel Logout (OpenID Connect)" }
+            }
+            p class="text-muted" style="margin-bottom: 16px; font-size: 13px;" {
+                "Notify this application via a direct server-to-server POST request when a user signs out."
+            }
+            form hx-post={"/admin/clients/" (client.client_id) "/backchannel-logout"} hx-target="body" {
+                div class="form-group" style="margin-bottom: 16px;" {
+                    label for="backchannel_logout_uri" { "Back-Channel Logout Endpoint URL" }
+                    input type="text" id="backchannel_logout_uri" name="backchannel_logout_uri" value=(client.backchannel_logout_uri.clone().unwrap_or_default()) placeholder="https://app.example.com/api/backchannel-logout";
+                }
+                div class="form-group" style="margin-bottom: 16px;" {
+                    label class="checkbox-label" style="display:flex; align-items:center; gap:8px; cursor:pointer;" {
+                        input type="checkbox" name="backchannel_logout_session_required" value="true" checked[client.backchannel_logout_session_required];
+                        span { "Include session ID (sid claim) in logout token" }
+                    }
+                }
+                button type="submit" class="btn btn-primary" { "Save Logout Settings" }
             }
         }
 

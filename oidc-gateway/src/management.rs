@@ -984,6 +984,8 @@ pub async fn export_user_data(
     let user = store::get_user(user_id).await?.ok_or("user not found")?;
     let memberships = store::list_user_tenants(user_id).await.unwrap_or_default();
 
+    let consents = store::list_user_consents(user_id).await.unwrap_or_default();
+
     // Strip sensitive credential material before export
     let export = serde_json::json!({
         "id": user.id,
@@ -997,6 +999,12 @@ pub async fn export_user_data(
         "memberships": memberships.iter().map(|m| serde_json::json!({
             "tenant_id": m.tenant_id,
             "role": m.role,
+        })).collect::<Vec<_>>(),
+        "consents": consents.iter().map(|c| serde_json::json!({
+            "client_id": c.client_id,
+            "scopes": c.scopes,
+            "granted_at": c.granted_at,
+            "updated_at": c.updated_at,
         })).collect::<Vec<_>>(),
     });
 

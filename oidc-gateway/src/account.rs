@@ -106,7 +106,6 @@ fn redirect_to_login(msg: &str) -> Response<String> {
 // ── IdP session cookie (SSO / prompt=none) ──────────────────
 
 const IDP_COOKIE_NAME: &str = "lid_session";
-const IDP_SESSION_TTL: u64 = 1800; // 30 min — matches TTL_IDP_SESSION in store
 
 /// Create a new IdP browser session and return the Set-Cookie header value.
 /// Called on every successful login; enables `prompt=none` and SSO for SPAs.
@@ -116,16 +115,17 @@ pub async fn create_idp_session_cookie(
     auth_time: u64,
 ) -> Result<String, String> {
     let token = store::random_hex(32);
+    let ttl = store::get_idp_session_ttl().await;
     let session = store::IdpSession {
         user_id: user_id.to_string(),
         auth_time,
-        expires_at: store::unix_now() + IDP_SESSION_TTL,
+        expires_at: store::unix_now() + ttl,
         amr: amr.to_vec(),
     };
     store::save_idp_session(&token, &session).await?;
     let secure = if crate::is_dev_mode() { "" } else { " Secure;" };
     Ok(format!(
-        "{IDP_COOKIE_NAME}={token}; HttpOnly;{secure} SameSite=Lax; Path=/; Max-Age={IDP_SESSION_TTL}"
+        "{IDP_COOKIE_NAME}={token}; HttpOnly;{secure} SameSite=Lax; Path=/; Max-Age={ttl}"
     ))
 }
 
@@ -177,11 +177,12 @@ pub async fn refresh_idp_session_cookie_header(headers: &HeaderMap) -> Option<St
     if store::unix_now() > session.expires_at {
         return None;
     }
-    session.expires_at = store::unix_now() + IDP_SESSION_TTL;
+    let ttl = store::get_idp_session_ttl().await;
+    session.expires_at = store::unix_now() + ttl;
     let _ = store::save_idp_session(&token, &session).await;
     let secure = if crate::is_dev_mode() { "" } else { " Secure;" };
     Some(format!(
-        "{IDP_COOKIE_NAME}={token}; HttpOnly;{secure} SameSite=Lax; Path=/; Max-Age={IDP_SESSION_TTL}"
+        "{IDP_COOKIE_NAME}={token}; HttpOnly;{secure} SameSite=Lax; Path=/; Max-Age={ttl}"
     ))
 }
 

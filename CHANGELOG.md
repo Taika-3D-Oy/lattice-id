@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.4] - 2026-08-26
+
+### Added
+
+- **Persistent User Consent Grants (RFC 6749 & GDPR)**:
+  - Saved user consent decisions in NATS KV (`consent:{user_id}:{client_id}`) upon user approval on the consent screen.
+  - Fast-path authorization and login flows now automatically verify prior consent grants and skip the consent prompt when identical or subset scopes were already approved.
+  - Forced consent prompt continues to be supported when clients specify `prompt=consent` or when new scopes are requested.
+  - GDPR compliance: User consent grants are exported in GDPR data export (`GET /api/users/:id/export`) and automatically purged on user deletion (`DELETE /api/users/:id`).
+
+- **First-Party Client Management & OAuth Settings in Admin UI**:
+  - Added "First-Party / Trusted Application" toggle in client registration modal and client detail page, allowing administrative bypass of the consent prompt for official applications.
+  - Added full OAuth client configuration in Admin UI for ID token signing algorithm selection (`RS256` / `ES256`), allowed grant types, and OpenID Connect Back-Channel Logout URL / session configuration.
+  - Added visual trust level and signing algorithm badges to the Admin clients table overview.
+
+- **Dynamic SSO Session Longevity & Settings**:
+  - Increased default IdP SSO browser cookie session duration (`DEFAULT_IDP_SESSION_TTL`) from 30 minutes to 7 days (`604800s`) with automatic rolling expiration extension on user activity.
+  - Added IdP SSO Browser Session Duration setting (1–90 days) in `/admin/settings` with persistence to `RuntimeSettings`.
+
 ## [1.9.3] - 2026-08-25
 
 ### Fixed

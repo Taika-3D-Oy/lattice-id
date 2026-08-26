@@ -260,6 +260,19 @@ pub struct AuthSession {
     /// Whether a consent screen must be shown before the auth code is issued.
     #[serde(default)]
     pub needs_consent: bool,
+    /// The prompt parameter from authorize request (e.g., "consent", "login", "none").
+    #[serde(default)]
+    pub prompt: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct UserConsent {
+    pub user_id: String,
+    pub client_id: String,
+    pub scopes: Vec<String>,
+    pub granted_at: u64,
+    #[serde(default)]
+    pub updated_at: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -763,7 +776,8 @@ const TTL_CONSUMED_MARKER: u64 = 86400 * 30; // 30 days
 const TTL_REVOCATION_MARKER: u64 = 86400 * 30; // 30 days
 const TTL_MFA_PENDING: u64 = 300; // 5 min
 const TTL_ACCOUNT_SESSION: u64 = 1800; // 30 min
-const TTL_IDP_SESSION: u64 = 1800; // 30 min
+pub const DEFAULT_IDP_SESSION_TTL: u64 = 86400 * 7; // 7 days (604,800s)
+const TTL_IDP_SESSION: u64 = DEFAULT_IDP_SESSION_TTL;
 const TTL_PASSKEY_CHALLENGE: u64 = 300; // 5 min
 const TTL_LOCKOUT: u64 = 3600; // 1 hour (generous buffer over default 15 min lock)
 const TTL_INVITATION: u64 = 86400 * 7; // 7 days
@@ -1390,6 +1404,17 @@ pub async fn delete_user(user_id: &str) -> Result<(), String> {
         if key.contains(&format!(":user:{user_id}")) || key.starts_with(&format!("user:{user_id}:"))
         {
             let _ = kv_delete(&store_name, &key).await;
+        }
+    }
+
+    // Remove all user consent grants (GDPR Art. 17)
+    let u_store = users_store();
+    let consent_prefix = format!("consent:{user_id}:");
+    if let Ok(user_keys) = kv_list_keys(&u_store).await {
+        for key in user_keys {
+            if key.starts_with(&consent_prefix) {
+                let _ = kv_delete(&u_store, &key).await;
+            }
         }
     }
 
@@ -2266,11 +2291,12 @@ pub struct IdpSession {
 }
 
 pub async fn save_idp_session(token: &str, session: &IdpSession) -> Result<(), String> {
+    let ttl = get_idp_session_ttl().await;
     kv_set_ttl(
         &sessions_store(),
         &format!("idp:{token}"),
         session,
-        TTL_IDP_SESSION,
+        ttl,
     )
     .await
 }
@@ -2373,6 +2399,8 @@ pub struct RuntimeSettings {
     pub allow_registration: bool,
     #[serde(default)]
     pub default_theme: Option<ClientTheme>,
+    #[serde(default)]
+    pub idp_session_ttl_seconds: Option<u64>,
 }
 
 const SETTINGS_KEY: &str = "settings:global";
@@ -2387,6 +2415,89 @@ pub async fn get_runtime_settings() -> RuntimeSettings {
 
 pub async fn save_runtime_settings(settings: &RuntimeSettings) -> Result<(), String> {
     kv_set(&clients_store(), SETTINGS_KEY, settings).await
+}
+
+pub async fn get_idp_session_ttl() -> u64 {
+    get_runtime_settings()
+        .await
+        .idp_session_ttl_seconds
+        .unwrap_or(DEFAULT_IDP_SESSION_TTL)
+}
+
+// ── Persistent User Consent Grants ───────────────────────────
+
+pub async fn save_user_consent(
+    user_id: &str,
+    client_id: &str,
+    new_scopes: &[String],
+) -> Result<(), String> {
+    let key = format!("consent:{user_id}:{client_id}");
+    let mut scopes = match get_user_consent(user_id, client_id).await? {
+        Some(existing) => existing.scopes,
+        None => Vec::new(),
+    };
+    for s in new_scopes {
+        let trimmed = s.trim();
+        if !trimmed.is_empty() && !scopes.iter().any(|existing| existing == trimmed) {
+            scopes.push(trimmed.to_string());
+        }
+    }
+    let now = unix_now();
+    let record = UserConsent {
+        user_id: user_id.to_string(),
+        client_id: client_id.to_string(),
+        scopes,
+        granted_at: now,
+        updated_at: now,
+    };
+    kv_set(&users_store(), &key, &record).await
+}
+
+pub async fn get_user_consent(
+    user_id: &str,
+    client_id: &str,
+) -> Result<Option<UserConsent>, String> {
+    let key = format!("consent:{user_id}:{client_id}");
+    kv_get(&users_store(), &key).await
+}
+
+pub async fn has_user_consented(
+    user_id: &str,
+    client_id: &str,
+    requested_scope_str: &str,
+) -> Result<bool, String> {
+    let consent = match get_user_consent(user_id, client_id).await? {
+        Some(c) => c,
+        None => return Ok(false),
+    };
+    let requested: Vec<&str> = requested_scope_str.split_whitespace().collect();
+    if requested.is_empty() {
+        return Ok(true);
+    }
+    let all_granted = requested
+        .iter()
+        .all(|req| consent.scopes.iter().any(|s| s == req));
+    Ok(all_granted)
+}
+
+pub async fn delete_user_consent(user_id: &str, client_id: &str) -> Result<(), String> {
+    let key = format!("consent:{user_id}:{client_id}");
+    kv_delete(&users_store(), &key).await
+}
+
+pub async fn list_user_consents(user_id: &str) -> Result<Vec<UserConsent>, String> {
+    let store_name = users_store();
+    let keys = kv_list_keys(&store_name).await?;
+    let prefix = format!("consent:{user_id}:");
+    let mut consents = Vec::new();
+    for key in keys {
+        if key.starts_with(&prefix)
+            && let Some(c) = kv_get::<UserConsent>(&store_name, &key).await?
+        {
+            consents.push(c);
+        }
+    }
+    Ok(consents)
 }
 
 // ── Device Authorization Grant (RFC 8628) ───────────────────

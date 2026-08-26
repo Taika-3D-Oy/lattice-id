@@ -92,6 +92,20 @@ pub async fn render_settings_page(session: &AdminSession) -> Response<String> {
                     }
                 }
 
+                div class="form-divider" style="border-top: 1px solid var(--border-color); margin: 24px 0;" {}
+
+                h3 style="margin-bottom: 8px;" { "Authentication & Session Lifetimes" }
+                p class="text-muted" style="margin-bottom: 16px; font-size: 13px;" {
+                    "Configure session longevity for Single Sign-On (SSO) and persistent browser authentication across applications."
+                }
+
+                div class="form-group" style="max-width: 360px; margin-bottom: 16px;" {
+                    label for="idp_session_ttl_days" { "IdP SSO Browser Session Duration (Days)" }
+                    @let days = settings.idp_session_ttl_seconds.map(|s| s / 86400).unwrap_or(7);
+                    input type="number" id="idp_session_ttl_days" name="idp_session_ttl_days" min="1" max="90" value=(days) required;
+                    div class="form-hint" { "Default: 7 days. Rolling expiration extended automatically on user activity." }
+                }
+
                 div class="form-actions" style="margin-top: 24px;" {
                     button type="submit" class="btn btn-primary" { "Save System Settings" }
                 }

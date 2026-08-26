@@ -210,6 +210,7 @@ pub async fn submit(body_bytes: &[u8], issuer: &str) -> Result<Response<String>,
         hinted_email: None,
         created_at: store::unix_now(),
         needs_consent: false,
+        prompt: None,
     };
     store::save_auth_session(&session_id, &session).await?;
 

@@ -759,9 +759,25 @@ pub async fn complete_login_with_amr(
     };
 
     // ── Consent screen ──────────────────────────────────────
-    // If the session requires consent, show the consent page before issuing
-    // the auth code. The consent page POSTs back with the code ready to use.
-    if session.needs_consent {
+    // If the session requires consent, check if the user has already approved
+    // these scopes previously. If not (or if prompt=consent), show the consent page.
+    let force_consent = session.prompt.as_deref() == Some("consent");
+    let needs_consent = if force_consent {
+        true
+    } else if session.needs_consent {
+        let already_consented = crate::store::has_user_consented(
+            &user.id,
+            &session.client_id,
+            &session.scope,
+        )
+        .await
+        .unwrap_or(false);
+        !already_consented
+    } else {
+        false
+    };
+
+    if needs_consent {
         // Store the pending auth code *before* consent so we can issue it
         // after approval without re-doing the whole login.
         crate::store::save_auth_code(&code, &auth_code).await?;
@@ -852,6 +868,7 @@ mod tests {
             hinted_email: None,
             created_at: 0,
             needs_consent: false,
+            prompt: None,
         };
         let amr = vec!["pwd".to_string(), "mfa".to_string(), "otp".to_string()];
         assert_eq!(
@@ -878,6 +895,7 @@ mod tests {
             hinted_email: None,
             created_at: 0,
             needs_consent: false,
+            prompt: None,
         };
         let amr = vec!["pwd".to_string()];
         assert_eq!(select_acr(&session, &amr), None);
@@ -1085,6 +1103,19 @@ pub async fn handle_consent(body_bytes: &[u8]) -> Result<Response<String>, Strin
             crate::util::percent_encode(&auth_code.state)
         ));
     }
+
+    // Persist user consent for this client and requested scopes
+    let requested_scopes: Vec<String> = auth_code
+        .scope
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect();
+    let _ = crate::store::save_user_consent(
+        &auth_code.user_id,
+        &auth_code.client_id,
+        &requested_scopes,
+    )
+    .await;
 
     let _ = crate::store::log_audit(
         "consent_approved",

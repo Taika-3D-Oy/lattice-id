@@ -54,6 +54,14 @@ pub fn form_value<'a>(form: &'a [(String, String)], key: &str) -> Option<&'a str
     form.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
 }
 
+/// Look up all values for a given key in a parsed form/query (useful for checkboxes/multi-selects).
+pub fn form_values<'a>(form: &'a [(String, String)], key: &str) -> Vec<&'a str> {
+    form.iter()
+        .filter(|(k, _)| k == key)
+        .map(|(_, v)| v.as_str())
+        .collect()
+}
+
 /// Escape HTML special characters to prevent XSS.
 pub fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")

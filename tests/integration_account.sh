@@ -359,6 +359,35 @@ PY
   assert_contains_file "consent" "$pc_login" "consent page rendered on prompt=consent"
   log "PASS: prompt=consent forces consent screen"
 
+  # ── Case 2e: Persistent consent — previously consented 3rd-party app skips consent on subsequent login ──
+  log "Case 2e: Persistent consent remembered for third-party client (tp_id)"
+  verifier=$(random_string)
+  challenge=$(pkce_challenge "$verifier")
+  local p_auth="$TMP_DIR/persist-auth.html"
+  local p_auth_h="$TMP_DIR/persist-auth.headers"
+  curl_capture GET \
+    "$BASE_URL/authorize?response_type=code&client_id=${tp_id}&redirect_uri=http://localhost:8090/callback&code_challenge=${challenge}&code_challenge_method=S256&state=persisted123&nonce=pn&scope=openid" \
+    "$p_auth" "$p_auth_h" >/dev/null
+  session_id=$(extract_session_id "$p_auth")
+
+  local p_login="$TMP_DIR/persist-login.txt"
+  local p_login_h="$TMP_DIR/persist-login.headers"
+  local p_status
+  p_status=$(curl_capture POST "$BASE_URL/login" "$p_login" "$p_login_h" \
+    -H 'content-type: application/x-www-form-urlencoded' \
+    --data-urlencode "session_id=$session_id" \
+    --data-urlencode "email=$admin_email" \
+    --data-urlencode "password=$admin_pass")
+  # Because Case 2b granted consent for tp_id with scope openid, subsequent login must NOT show consent page (302 redirect)
+  assert_eq "302" "$p_status" "previously granted 3rd-party client should skip consent on subsequent login"
+  local p_loc
+  p_loc=$(header_value "$p_login_h" location)
+  got_code=$(url_query_get "$p_loc" code)
+  [[ -n "$got_code" ]] || fail "no auth code returned when consent was remembered"
+  got_state=$(url_query_get "$p_loc" state) || true
+  assert_eq "persisted123" "$got_state" "state preserved when skipping consent"
+  log "PASS: Persistent consent remembered and consent screen skipped"
+
   # ═══════════════════════════════════════════════════════════════════════════
   # Case 3: GDPR — GET /api/users/:id/export
   # ═══════════════════════════════════════════════════════════════════════════
@@ -377,6 +406,9 @@ email = sys.argv[2]
 # Must have user object
 u = d.get("user") or d
 assert "id" in u or "user" in d, f"no user data: {d}"
+# Must have consents list
+assert "consents" in d, "export must include consents field"
+assert len(d["consents"]) >= 1, "consents list should contain previously granted client"
 # Must NOT expose sensitive fields
 raw = open(sys.argv[1]).read()
 assert "password_hash" not in raw, "export must not include password_hash"
