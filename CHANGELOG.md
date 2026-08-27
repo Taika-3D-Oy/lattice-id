@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.5] - 2026-08-27
+
+### Security
+
+- **Client Secret HMAC-SHA256 Hashing & Show-Once Admin Pattern**:
+  - `POST /admin/clients` and `POST /admin/clients/{id}/rotate-secret` hash client secrets with HMAC-SHA256 using `client_secret_pepper` before persisting to database.
+  - Raw secrets are never stored in plaintext and are revealed only once upon creation/rotation.
+  - Client detail view masks secrets (`•••••••••••••••••••••••••••••••• (HMAC-SHA256 Protected)`).
+- **Constant-Time Verification & Backward Compatibility**:
+  - Constant-time secret comparison (`subtle::ConstantTimeEq`) in token authentication (`token.rs`) against HMAC hashes, with graceful constant-time fallback for pre-existing legacy raw client secrets.
+- **Session Token Hashing in KV Store**:
+  - User session tokens are hashed (`sha256_hex(token)`) before storing in KV keyspace (`store.rs`), preventing session hijacking if KV backups or database records are accessed.
+  - Graceful fallback for active unhashed legacy sessions.
+- **Admin CSRF Protection Enforcement**:
+  - Enforced CSRF validation across all mutating admin routes (`POST`, `PUT`, `DELETE`).
+
 ## [1.9.4] - 2026-08-26
 
 ### Added

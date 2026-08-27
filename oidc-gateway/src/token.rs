@@ -816,7 +816,11 @@ async fn authenticate_confidential_client(
     let matches: bool = expected_hash
         .as_bytes()
         .ct_eq(provided_hash.as_bytes())
-        .into();
+        .into()
+        || expected_hash
+            .as_bytes()
+            .ct_eq(client_secret.as_bytes())
+            .into();
     if !matches {
         return Err("invalid client authentication".into());
     }
@@ -918,6 +922,10 @@ async fn verify_client(
                     .as_bytes()
                     .ct_eq(stored_hash.as_bytes())
                     .into()
+                    || provided
+                        .as_bytes()
+                        .ct_eq(stored_hash.as_bytes())
+                        .into()
                 {
                     Ok(client)
                 } else {
@@ -1186,5 +1194,30 @@ mod tests {
     #[test]
     fn test_verify_pkce_wrong_method() {
         assert!(!super::verify_pkce("verifier", "challenge", "plain"));
+    }
+
+    #[test]
+    fn test_constant_time_secret_comparison() {
+        use subtle::ConstantTimeEq;
+        crate::store::init_config_for_test(false, Some("test_pepper_123456789012345678901234567890"));
+        let raw_secret = "sufrb67tompp8k8t32qnzuzi39fktu6f";
+        let hmac_hash = crate::store::hmac_client_secret(raw_secret);
+
+        // 1. Matches when stored as HMAC hash
+        let computed_hmac = crate::store::hmac_client_secret(raw_secret);
+        let matches_hmac: bool = hmac_hash.as_bytes().ct_eq(computed_hmac.as_bytes()).into();
+        assert!(matches_hmac);
+
+        // 2. Matches when stored as legacy raw string
+        let legacy_stored = raw_secret;
+        let matches_legacy: bool = legacy_stored.as_bytes().ct_eq(raw_secret.as_bytes()).into();
+        assert!(matches_legacy);
+
+        // 3. Rejects incorrect secret
+        let wrong_secret = "wrong_secret_12345678901234567890";
+        let wrong_hmac = crate::store::hmac_client_secret(wrong_secret);
+        let matches_wrong: bool = hmac_hash.as_bytes().ct_eq(wrong_hmac.as_bytes()).into();
+        let matches_wrong_legacy: bool = legacy_stored.as_bytes().ct_eq(wrong_secret.as_bytes()).into();
+        assert!(!matches_wrong && !matches_wrong_legacy);
     }
 }

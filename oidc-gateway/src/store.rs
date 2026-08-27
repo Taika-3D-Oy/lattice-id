@@ -138,6 +138,31 @@ pub async fn init_config() {
     });
 }
 
+#[cfg(test)]
+pub fn init_config_for_test(dev_mode: bool, client_secret_pepper: Option<&str>) {
+    CONFIG_CACHE.with(|c| {
+        *c.borrow_mut() = Some(OidcConfigCache {
+            ldb_instance: "lid".to_string(),
+            lockout_threshold: None,
+            lockout_duration_secs: None,
+            keys_bucket: None,
+            tenant_bucket: None,
+            region_id: None,
+            internal_auth_secret: None,
+            region_domains: None,
+            region_internal_urls: None,
+            issuer_url: None,
+            dev_mode: if dev_mode { Some("true".to_string()) } else { None },
+            require_email_verification: None,
+            allow_registration: None,
+            bootstrap_hook: None,
+            refresh_absolute_max_secs: None,
+            email_pepper: None,
+            client_secret_pepper: client_secret_pepper.map(|s| s.to_string()),
+        });
+    });
+}
+
 fn with_config<T>(f: impl FnOnce(&OidcConfigCache) -> T) -> T {
     CONFIG_CACHE.with(|c| {
         let borrow = c.borrow();
@@ -2256,9 +2281,10 @@ pub struct AccountSession {
 }
 
 pub async fn save_account_session(token: &str, session: &AccountSession) -> Result<(), String> {
+    let hashed = sha256_hex(token);
     kv_set_ttl(
         &sessions_store(),
-        &format!("acct:{token}"),
+        &format!("acct:{hashed}"),
         session,
         TTL_ACCOUNT_SESSION,
     )
@@ -2266,11 +2292,18 @@ pub async fn save_account_session(token: &str, session: &AccountSession) -> Resu
 }
 
 pub async fn get_account_session(token: &str) -> Result<Option<AccountSession>, String> {
+    let hashed = sha256_hex(token);
+    if let Some(session) = kv_get(&sessions_store(), &format!("acct:{hashed}")).await? {
+        return Ok(Some(session));
+    }
+    // Fallback to unhashed key for rolling deploys
     kv_get(&sessions_store(), &format!("acct:{token}")).await
 }
 
 pub async fn delete_account_session(token: &str) -> Result<(), String> {
-    kv_delete(&sessions_store(), &format!("acct:{token}")).await
+    let hashed = sha256_hex(token);
+    let _ = kv_delete(&sessions_store(), &format!("acct:{token}")).await;
+    kv_delete(&sessions_store(), &format!("acct:{hashed}")).await
 }
 
 // ── IdP browser sessions (SSO, prompt=none) ─────────────────
@@ -2291,10 +2324,11 @@ pub struct IdpSession {
 }
 
 pub async fn save_idp_session(token: &str, session: &IdpSession) -> Result<(), String> {
+    let hashed = sha256_hex(token);
     let ttl = get_idp_session_ttl().await;
     kv_set_ttl(
         &sessions_store(),
-        &format!("idp:{token}"),
+        &format!("idp:{hashed}"),
         session,
         ttl,
     )
@@ -2302,11 +2336,18 @@ pub async fn save_idp_session(token: &str, session: &IdpSession) -> Result<(), S
 }
 
 pub async fn get_idp_session(token: &str) -> Result<Option<IdpSession>, String> {
+    let hashed = sha256_hex(token);
+    if let Some(session) = kv_get(&sessions_store(), &format!("idp:{hashed}")).await? {
+        return Ok(Some(session));
+    }
+    // Fallback to unhashed key for rolling deploys
     kv_get(&sessions_store(), &format!("idp:{token}")).await
 }
 
 pub async fn delete_idp_session(token: &str) -> Result<(), String> {
-    kv_delete(&sessions_store(), &format!("idp:{token}")).await
+    let hashed = sha256_hex(token);
+    let _ = kv_delete(&sessions_store(), &format!("idp:{token}")).await;
+    kv_delete(&sessions_store(), &format!("idp:{hashed}")).await
 }
 
 // ── Known IPs (suspicious login detection) ──────────────────

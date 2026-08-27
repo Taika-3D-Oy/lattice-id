@@ -189,10 +189,12 @@ pub async fn handle_admin_route(
                 .collect();
 
             let client_id = format!("client_{}", &store::random_alphanumeric(16));
-            let client_secret = if client_type == "confidential" {
-                Some(store::random_alphanumeric(32))
+            let (client_secret, raw_secret_opt) = if client_type == "confidential" {
+                let raw = store::random_alphanumeric(32);
+                let hashed = store::hmac_client_secret(&raw);
+                (Some(hashed), Some(raw))
             } else {
-                None
+                (None, None)
             };
 
             let theme = if logo_url.is_some() || primary_color.is_some() || background_color.is_some() || theme_preset.is_some() || app_name != name {
@@ -224,7 +226,11 @@ pub async fn handle_admin_route(
             if let Err(e) = store::save_client(&client).await {
                 return error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("Failed to save client: {e}"));
             }
-            redirect_response(&format!("/admin/clients/{client_id}"))
+            if let Some(raw_secret) = raw_secret_opt {
+                views::clients::render_client_detail_page(&session, &client, Some(&raw_secret)).await
+            } else {
+                redirect_response(&format!("/admin/clients/{client_id}"))
+            }
         }
 
         // ── Users ──
@@ -489,12 +495,12 @@ async fn handle_parameterized_route(
         if let Some((id, sub)) = rest.split_once('/') {
             if sub == "rotate-secret" && method == Method::POST {
                 if let Ok(Some(mut client)) = store::get_client(id).await {
-                    let new_secret = store::random_alphanumeric(32);
-                    client.client_secret = Some(new_secret.clone());
+                    let new_raw_secret = store::random_alphanumeric(32);
+                    client.client_secret = Some(store::hmac_client_secret(&new_raw_secret));
                     let _ = store::save_client(&client).await;
                     return html_response(format!(
-                        r#"<div class="secret-box"><span class="copy-chip" onclick="copyToClipboard(this, this.innerText)">{}</span></div>"#,
-                        new_secret
+                        r#"<div class="alert alert-warning" style="margin-top: 12px; padding: 12px; background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.4); border-radius: var(--radius);"><div style="font-weight: 600; color: #f59e0b; margin-bottom: 4px; font-size: 13px;">⚠️ Copy New Secret (Shown Once)</div><div style="display: flex; align-items: center; gap: 8px;"><span class="mono copy-chip" onclick="copyToClipboard(this, this.innerText)" style="font-size: 13px; font-weight: 600;">{}</span><button class="btn btn-xs btn-primary" onclick="copyToClipboard(this, this.previousElementSibling.innerText)">Copy</button></div></div>"#,
+                        new_raw_secret
                     ));
                 }
             }
@@ -516,12 +522,6 @@ async fn handle_parameterized_route(
                             client.name = name.trim().to_string();
                         }
                     }
-                    let first_party = form_value(&form, "first_party").map(|v| v == "true" || v == "on").unwrap_or(false);
-                    client.first_party = first_party;
-                    let alg = form_value(&form, "id_token_signed_response_alg")
-                        .filter(|a| !a.trim().is_empty())
-                        .map(|a| a.trim().to_string());
-                    client.id_token_signed_response_alg = alg;
                     let gts: Vec<String> = crate::util::form_values(&form, "grant_types")
                         .into_iter()
                         .map(|s| s.to_string())
@@ -595,7 +595,7 @@ async fn handle_parameterized_route(
             let id = rest;
             if method == Method::GET {
                 if let Ok(Some(client)) = store::get_client(id).await {
-                    return views::clients::render_client_detail_page(session, &client).await;
+                    return views::clients::render_client_detail_page(session, &client, None).await;
                 }
             } else if method == Method::POST {
                 let form = parse_form(body);

@@ -212,7 +212,11 @@ pub fn render_new_client_modal() -> Markup {
     }
 }
 
-pub async fn render_client_detail_page(session: &AdminSession, client: &OidcClient) -> Response<String> {
+pub async fn render_client_detail_page(
+    session: &AdminSession,
+    client: &OidcClient,
+    new_created_secret: Option<&str>,
+) -> Response<String> {
     let redirect_uris_text = client.redirect_uris.join("\n");
     let is_confidential = client.client_secret.is_some();
     let theme = client.theme.clone().unwrap_or_default();
@@ -223,6 +227,21 @@ pub async fn render_client_detail_page(session: &AdminSession, client: &OidcClie
             a href="/admin/clients" { "Clients" }
             span { "/" }
             span { (client.name) }
+        }
+
+        @if let Some(raw_secret) = new_created_secret {
+            div class="alert alert-warning" style="margin-bottom: 20px; padding: 16px; background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.4); border-radius: var(--radius);" {
+                div style="font-weight: 600; color: #f59e0b; margin-bottom: 6px; font-size: 14px;" {
+                    "⚠️ Make sure to copy your Client Secret now"
+                }
+                p style="margin: 0 0 10px; font-size: 13px; color: var(--text-secondary);" {
+                    "For security reasons, client secrets are hashed with HMAC-SHA256 and cannot be retrieved again."
+                }
+                div class="reveal-field" style="background: var(--bg-card); padding: 8px 12px; border: 1px solid var(--border-color); border-radius: var(--radius); display: flex; align-items: center; gap: 8px;" {
+                    span class="mono copy-chip" onclick="copyToClipboard(this, this.innerText)" style="font-size: 14px; font-weight: 600;" { (raw_secret) }
+                    button class="btn btn-xs btn-primary" onclick="copyToClipboard(this, this.previousElementSibling.innerText)" { "Copy Secret" }
+                }
+            }
         }
 
         div class="page-header" {
@@ -263,19 +282,19 @@ pub async fn render_client_detail_page(session: &AdminSession, client: &OidcClie
                     }
                 }
 
-                @if let Some(ref secret) = client.client_secret {
+                @if client.client_secret.is_some() {
                     div class="label" { "Client Secret" }
                     div class="value" {
-                        div class="reveal-field" {
-                            span class="mono" { (secret) }
-                            button class="btn btn-xs" onclick="copyToClipboard(this, this.previousElementSibling.innerText)" { "Copy" }
+                        div class="reveal-field" style="display: flex; align-items: center; gap: 8px;" {
+                            span class="mono text-muted" style="font-size: 13px;" { "•••••••••••••••••••••••••••••••• (HMAC-SHA256 Protected)" }
                             button class="btn btn-xs btn-danger"
                                    hx-post={"/admin/clients/" (client.client_id) "/rotate-secret"}
-                                   hx-confirm="Rotate secret? Any services using the old secret will fail immediately."
-                                   hx-target="body" {
+                                   hx-confirm="Rotate secret? A new secret will be generated and shown once. Any services using the old secret will fail immediately."
+                                   hx-target="#secret-reveal-container" {
                                 "Rotate Secret"
                             }
                         }
+                        div id="secret-reveal-container" {}
                     }
                 }
             }
