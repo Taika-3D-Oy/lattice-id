@@ -872,7 +872,6 @@ pub(crate) async fn ldb_request(
 }
 
 async fn try_ldb_tcp(body: &[u8]) -> Result<serde_json::Value, String> {
-    let t0 = crate::bindings::wasi::clocks::monotonic_clock::now();
     use crate::bindings::wasi::sockets::instance_network::instance_network;
     use crate::bindings::wasi::sockets::network::{
         IpAddressFamily, IpSocketAddress, Ipv4SocketAddress,
@@ -948,8 +947,6 @@ async fn try_ldb_tcp(body: &[u8]) -> Result<serde_json::Value, String> {
         format!("tcp connect failed after retries: {last_err}")
     })?;
 
-    let t_connected = crate::bindings::wasi::clocks::monotonic_clock::now();
-
     // Write request frame: [4 bytes length][payload]
     let len_bytes = (body.len() as u32).to_be_bytes();
     let mut frame = Vec::with_capacity(4 + body.len());
@@ -959,8 +956,6 @@ async fn try_ldb_tcp(body: &[u8]) -> Result<serde_json::Value, String> {
     out_stream
         .blocking_write_and_flush(&frame)
         .map_err(|e| format!("tcp send: {e:?}"))?;
-
-    let t_written = crate::bindings::wasi::clocks::monotonic_clock::now();
 
     // Read response frame: 4-byte length prefix
     let mut buf = Vec::with_capacity(4);
@@ -992,15 +987,6 @@ async fn try_ldb_tcp(body: &[u8]) -> Result<serde_json::Value, String> {
     drop(in_stream);
     drop(out_stream);
     drop(socket);
-
-    let t_read = crate::bindings::wasi::clocks::monotonic_clock::now();
-    eprintln!(
-        "TCP TIMING: connect: {} ms, write: {} ms, read: {} ms, total: {} ms",
-        (t_connected - t0) / 1_000_000,
-        (t_written - t_connected) / 1_000_000,
-        (t_read - t_written) / 1_000_000,
-        (t_read - t0) / 1_000_000,
-    );
 
     serde_json::from_slice(&buf).map_err(|e| format!("parse response: {e}"))
 }
