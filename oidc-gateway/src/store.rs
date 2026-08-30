@@ -815,34 +815,33 @@ use base64::engine::general_purpose::STANDARD as B64;
 
 const LDB_TCP_PORT: u16 = 4080;
 
-/// Send a JSON request to lattice-db via localhost TCP.
-/// Wire protocol: 4-byte BE length prefix + JSON body (with `_op` field).
+/// Send a request to lattice-db via localhost TCP.
+/// Wire protocol:
+/// - Request: [4-byte total_len][1-byte op_len][op][payload]
+/// - Response: [4-byte total_len][2-byte status_code][payload]
 pub(crate) async fn ldb_request(
     op: &str,
     payload: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    // Build payload with _op and consistency context.
+    // Build payload with consistency context.
     let mut payload = payload.clone();
-    payload
-        .as_object_mut()
-        .unwrap()
-        .insert("_op".to_string(), serde_json::Value::String(op.to_string()));
 
     if let Some(table) = payload.get("table").and_then(|t| t.as_str()) {
         let min_rev = SESSION_REVISIONS.with(|sr| sr.borrow().get(table).copied());
         if let Some(rev) = min_rev {
-            payload.as_object_mut().unwrap().insert(
-                "consistency".to_string(),
-                serde_json::json!({ "min_revision": rev }),
-            );
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert(
+                    "consistency".to_string(),
+                    serde_json::json!({ "min_revision": rev }),
+                );
+            }
         }
     }
 
-    let payload_str = serde_json::to_string(&payload).map_err(|e| format!("serialize: {e}"))?;
-    let body = payload_str.as_bytes();
+    let payload_bytes = serde_json::to_vec(&payload).map_err(|e| format!("serialize: {e}"))?;
 
     // Direct localhost TCP loopback to co-located storage-service (127.0.0.1:4080)
-    let val: serde_json::Value = try_ldb_tcp(body).await
+    let val: serde_json::Value = try_ldb_tcp(op, &payload_bytes).await
         .map_err(|e| format!("ldb_request error on {op} (tcp): {e}"))?;
 
     if let Some(err) = val.get("error").and_then(|v| v.as_str()) {
@@ -871,7 +870,7 @@ pub(crate) async fn ldb_request(
     Ok(val)
 }
 
-async fn try_ldb_tcp(body: &[u8]) -> Result<serde_json::Value, String> {
+async fn try_ldb_tcp(op: &str, body: &[u8]) -> Result<serde_json::Value, String> {
     use crate::bindings::wasi::sockets::instance_network::instance_network;
     use crate::bindings::wasi::sockets::network::{
         IpAddressFamily, IpSocketAddress, Ipv4SocketAddress,
@@ -947,10 +946,13 @@ async fn try_ldb_tcp(body: &[u8]) -> Result<serde_json::Value, String> {
         format!("tcp connect failed after retries: {last_err}")
     })?;
 
-    // Write request frame: [4 bytes length][payload]
-    let len_bytes = (body.len() as u32).to_be_bytes();
-    let mut frame = Vec::with_capacity(4 + body.len());
-    frame.extend_from_slice(&len_bytes);
+    // Write request frame: [4-byte total_len] [1-byte op_len] [op bytes] [payload]
+    let op_bytes = op.as_bytes();
+    let total_len = (1 + op_bytes.len() + body.len()) as u32;
+    let mut frame = Vec::with_capacity(4 + 1 + op_bytes.len() + body.len());
+    frame.extend_from_slice(&total_len.to_be_bytes());
+    frame.push(op_bytes.len() as u8);
+    frame.extend_from_slice(op_bytes);
     frame.extend_from_slice(body);
 
     out_stream
@@ -968,12 +970,16 @@ async fn try_ldb_tcp(body: &[u8]) -> Result<serde_json::Value, String> {
         }
         buf.extend_from_slice(&chunk);
     }
-    let resp_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-    buf.clear();
-    buf.reserve(resp_len);
+    let total_resp_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+    if total_resp_len < 2 {
+        return Err("response frame too short".into());
+    }
 
-    while buf.len() < resp_len {
-        let needed = (resp_len - buf.len()) as u64;
+    buf.clear();
+    buf.reserve(total_resp_len);
+
+    while buf.len() < total_resp_len {
+        let needed = (total_resp_len - buf.len()) as u64;
         let to_read = needed.min(65536);
         let chunk = in_stream
             .blocking_read(to_read)
@@ -988,7 +994,20 @@ async fn try_ldb_tcp(body: &[u8]) -> Result<serde_json::Value, String> {
     drop(out_stream);
     drop(socket);
 
-    serde_json::from_slice(&buf).map_err(|e| format!("parse response: {e}"))
+    let status_code = u16::from_be_bytes([buf[0], buf[1]]);
+    let resp_payload = &buf[2..];
+
+    let val: serde_json::Value = serde_json::from_slice(resp_payload)
+        .map_err(|e| format!("parse response: {e}"))?;
+
+    if status_code != 0 {
+        if let Some(err) = val.get("error").and_then(|v| v.as_str()) {
+            return Err(err.to_string());
+        }
+        return Err(format!("error {status_code}"));
+    }
+
+    Ok(val)
 }
 
 /// Check if a lattice-db error indicates "not found".

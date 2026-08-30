@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.6] - 2026-08-31
+
+### Changed
+
+- **Modernized Co-Located lattice-db TCP Framing**:
+  - Updated `ldb_request` and `try_ldb_tcp` in `oidc-gateway/src/store.rs` to use framed TCP protocol: `[4-byte total_len][1-byte op_len][op][payload]`.
+  - Parses response frame status codes (`[4-byte total_len][2-byte status_code][payload]`) directly without payload `_op` mutation, matching NATS ADR-32 microservice semantics.
+
 ## [1.9.5] - 2026-08-27
 
 ### Security
