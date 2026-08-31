@@ -5,19 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.9.6] - 2026-08-31
+## [1.10.0] - 2026-08-31
+
+### Breaking Changes
+
+- **NATS ADR-32 & Framed TCP Protocol**:
+  - Migrated localhost `lattice-db` loopback communication to the framed binary protocol (`[4-byte total_len][1-byte op_len][op][payload]` request and `[4-byte total_len][2-byte status_code][payload]` response), matching `lattice-db` v1.11.0.
 
 ### Fixed
 
 - **Discovery Endpoints & TCP Connection Resilience**:
   - Moved dev mode test client seeding (`ensure_default_client`, `ensure_admin_client`) out of the global request pipeline into the authenticated/management flow handlers. Public discovery and health endpoints (`/.well-known/jwks.json`, `/.well-known/openid-configuration`, `/healthz`, `/version`) now bypass dev client seeding, eliminating redundant KV writes and connection spikes.
   - Enhanced `try_ldb_tcp` with per-attempt network instantiation, dynamic `LDB_TCP_PORT` resolution, and progressive backoff (5ms–50ms over 15 retries), resolving `ErrorCode::ConcurrencyConflict` during rapid sequential TCP requests.
-
-### Changed
-
-- **Modernized Co-Located lattice-db TCP Framing**:
-  - Updated `ldb_request` and `try_ldb_tcp` in `oidc-gateway/src/store.rs` to use framed TCP protocol: `[4-byte total_len][1-byte op_len][op][payload]`.
-  - Parses response frame status codes (`[4-byte total_len][2-byte status_code][payload]`) directly without payload `_op` mutation, matching NATS ADR-32 microservice semantics.
 
 ## [1.9.5] - 2026-08-27
 
