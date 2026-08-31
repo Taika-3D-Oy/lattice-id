@@ -877,23 +877,33 @@ async fn try_ldb_tcp(op: &str, body: &[u8]) -> Result<serde_json::Value, String>
     };
     use crate::bindings::wasi::sockets::tcp_create_socket::create_tcp_socket;
 
-    let network = instance_network();
+    let port = std::env::var("LDB_TCP_PORT")
+        .ok()
+        .and_then(|v| v.parse::<u16>().ok())
+        .unwrap_or(LDB_TCP_PORT);
+
     let addr = IpSocketAddress::Ipv4(Ipv4SocketAddress {
-        port: LDB_TCP_PORT,
+        port,
         address: (127, 0, 0, 1),
     });
 
     let mut last_err = String::new();
     let mut streams = None;
 
-    for _ in 0..10 {
+    for attempt in 0..15 {
+        if attempt > 0 {
+            let delay_ns = (5_000_000 * (attempt as u64)).min(50_000_000);
+            let p = crate::bindings::wasi::clocks::monotonic_clock::subscribe_duration(delay_ns);
+            p.block();
+            drop(p);
+        }
+
+        let network = instance_network();
         let socket = match create_tcp_socket(IpAddressFamily::Ipv4) {
             Ok(s) => s,
             Err(e) => {
                 last_err = format!("tcp create: {e:?}");
-                let p = crate::bindings::wasi::clocks::monotonic_clock::subscribe_duration(1_000_000);
-                p.block();
-                drop(p);
+                drop(network);
                 continue;
             }
         };
@@ -903,12 +913,11 @@ async fn try_ldb_tcp(op: &str, body: &[u8]) -> Result<serde_json::Value, String>
             Err(e) => {
                 last_err = format!("start_connect: {e:?}");
                 drop(socket);
-                let p = crate::bindings::wasi::clocks::monotonic_clock::subscribe_duration(1_000_000);
-                p.block();
-                drop(p);
+                drop(network);
                 continue;
             }
         }
+        drop(network);
 
         let mut connected = false;
         for _ in 0..10 {

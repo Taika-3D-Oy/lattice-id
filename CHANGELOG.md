@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.9.6] - 2026-08-31
 
+### Fixed
+
+- **Discovery Endpoints & TCP Connection Resilience**:
+  - Moved dev mode test client seeding (`ensure_default_client`, `ensure_admin_client`) out of the global request pipeline into the authenticated/management flow handlers. Public discovery and health endpoints (`/.well-known/jwks.json`, `/.well-known/openid-configuration`, `/healthz`, `/version`) now bypass dev client seeding, eliminating redundant KV writes and connection spikes.
+  - Enhanced `try_ldb_tcp` with per-attempt network instantiation, dynamic `LDB_TCP_PORT` resolution, and progressive backoff (5ms–50ms over 15 retries), resolving `ErrorCode::ConcurrencyConflict` during rapid sequential TCP requests.
+
 ### Changed
 
 - **Modernized Co-Located lattice-db TCP Framing**:

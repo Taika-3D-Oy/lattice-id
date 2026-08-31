@@ -253,13 +253,6 @@ async fn handle_request(
     let req_path = full_path.split('?').next().unwrap_or("/").to_string();
     let trace_id = logger::begin_request(req.headers(), req.method(), &full_path, &remote_ip);
 
-    // NOTE: Component instances are fresh per request (new Store + Instance),
-    // so static guards cannot skip this. The call is cheap and idempotent.
-    if is_dev_mode() {
-        let _ = store::ensure_default_client().await;
-        let _ = store::ensure_admin_client(&get_issuer(), true).await;
-    }
-
     let resp = match handle(req, &remote_ip).await {
         Ok(resp) => resp,
         Err(e) => {
@@ -413,6 +406,12 @@ async fn handle(
         .headers
         .get("authorization")
         .and_then(|v| v.to_str().ok());
+
+    // In dev mode, ensure default test clients exist before handling auth/management flows.
+    if is_dev_mode() {
+        let _ = store::ensure_default_client().await;
+        let _ = store::ensure_admin_client(&issuer, true).await;
+    }
 
     match (&parts.method, route_path) {
         // ── Health / Readiness ─────────────────────────────
